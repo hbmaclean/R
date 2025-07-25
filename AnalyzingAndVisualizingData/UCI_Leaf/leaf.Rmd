@@ -1,0 +1,2100 @@
+---
+title: "UCI Leaf Analysis"
+author: "hbmaclean"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    df_print: paged
+    code_folding: show
+editor_options:
+  markdown:
+    toc: true
+    wrap: 72
+---
+
+```{css, echo = FALSE}
+h1 {
+    margin-top: 2em;
+    border-bottom: 2px solid black;
+    padding-bottom: 5px;
+}
+h2 {
+    margin-top: 1em;
+}
+h3 {
+    margin-top: 1em;
+}
+p {
+    margin-top: 2px;
+}
+table {
+    margin-top: 1em;
+    margin-bottom: 1em;
+    background: snow;
+}
+th {
+    background: snow;
+}
+img {
+    border: 1px solid black;
+    margin-top: 4px;
+    margin-bottom: 4px;
+    width: 100%;
+}
+```
+
+```{r setup, include = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+repo <- "http://cran.us.r-project.org"
+packages <- c(
+    'stringr', 'readr', 'tidyr', 'dplyr', 'caret', 'tibble', 'data.table',
+    'ggplot2', 'grid', 'gridExtra', 'ggcorrplot','GGally', 'ggfortify', 'ggrepel',
+     'matrixStats', 'boot.pval', 'corrplot', 'kableExtra', 'varhandle', 'devtools',
+    'ranger', 'randomForest', 'fastICA', 'car', 'parsnip', 'nnet', 'missMethods'
+)
+for (package in packages) { 
+    if (!require(package, character.only = TRUE)) {
+        install.packages(package, repos = repo)
+        library(package, character.only = TRUE)
+    }
+}
+
+install_github('munoztd0/reprtree')
+eval(substitute(library(pkg), list(pkg='reprtree')))
+library(reprtree)
+
+set.seed(1)
+```
+
+# Introduction
+
+This analysis primarily serves to keep me learning. I chose this data
+set as somewhat of an amateur botanist; I recognize most of the 40
+listed genus names. I seem to be in unchartered territory though as the
+[data description](https://archive.ics.uci.edu/dataset/288/leaf) does
+not have any citations or baseline model performance (unlike
+[mushrooms](https://archive.ics.uci.edu/dataset/73/mushroom) for
+example.)
+
+Glancing at the data, I'm in for a challenge as the features are all
+doubles with very fine precision. There is no obvious way of
+transforming the data such that it can be meaningfully grouped. Here
+goes...
+
+# Data Creation
+
+This downloads the
+[zip](https://archive.ics.uci.edu/static/public/288/leaf.zip); extracts
+the data file; reads and parses the lines into a `data.frame`; converts
+to numeric; and adds column names.
+
+```{r}
+fetch_data <- function(verbose=FALSE) {
+    options(timeout = 120)
+    tmp   <- tempfile()
+    zip   <- "https://archive.ics.uci.edu/static/public/288/leaf.zip"
+    
+    download.file(zip, tmp, quiet = !verbose)
+    data <- as.data.frame(
+        str_split(
+            read_lines(
+                unz(tmp, "leaf.csv")
+            ),
+            ",",
+            simplify=TRUE
+        )
+    ) |> mutate(across(everything(), ~ as.double(.x)))
+    
+    colnames(data) <- c(
+        'Species', 'SpecimenNumber', 'Eccentricity', 'AspectRatio',
+        'Elongation', 'Solidity', 'StochasticConvexity',
+        'IsoperimetricFactor', 'MaxIndentationDepth', 'Lobedness',
+        'AverageIntensity', 'AverageContrast', 'Smoothness',
+        'ThirdMoment', 'Uniformity', 'Entropy'
+    )
+
+    return(data)
+}
+
+leaf_df <- fetch_data()
+```
+
+\newpage
+
+Currently the row names are equivalent to SpecimenNumber. The trees'
+genus and species are provided separately. Here I glue together new row
+names with genus, species, and specimen number.
+
+I then drop SpecimenNumber, which surely is just metadata without
+predictive power.
+
+```{r}
+names <- c(
+    '1' = 'Quercus suber', '2' = 'Salix atrocinerea', '3' = 'Populus nigra',
+    '4' = 'Alnus sp', '5' = 'Quercus robur', '6' = 'Crataegus monogyna',
+    '7' = 'Ilex aquifolium', '8' = 'Nerium oleander', '9' = 'Betula pubescens',
+    '10' = 'Tilia tomentosa', '11' = 'Acer palmaturu', '12' = 'Celtis sp',
+    '13' = 'Corylus avellana', '14' = 'Castanea sativa', '15' = 'Populus alba',
+    '22' = 'Primula vulgaris', '23' = 'Erodium sp', '24' = 'Bougainvillea sp',
+    '25' = 'Arisarum vulgare', '26' = 'Euonymus japonicus', '27' = 'Ilex perado ssp azorica',
+    '28' = 'Magnolia soulangeana', '29' = 'Buxus sempervirens', '30' = 'Urtica dioica',
+    '31' = 'Podocarpus sp', '32' = 'Acca sellowiana', '33' = 'Hydrangea sp',
+    '34' = 'Pseudosasa japonica', '35' = 'Magnolia grandiflora', '36' = 'Geranium sp'
+)
+rownames(leaf_df) <- paste(names[as.character(leaf_df$Species)], rownames(leaf_df))
+leaf_df$SpecimenNumber <- NULL
+```
+
+## Data Sample
+
+Now for a sample. Note, I've struggled with the lengthy column names as
+a header row. Clearly cells are vertically centered by default; and
+evidently `'vertical-align:bottom'` is ineffective in `row_spec`. It can
+be accomplished with `cell_spec`, but that renders a raw HTML span tag
+in the cell. I've done my best here to accommodate PDF and HTML. (Worth
+noting, PDF rotates `angle` *counterclockwise*.)
+
+```{r}
+slice_sample(leaf_df[,2:15], n = 5) |>
+    knitr::kable(digits = 2, align = 'c', caption = 'UCI Leaf Sample') |>
+    kable_styling(bootstrap_options = 'bordered') |>
+    row_spec(
+        0,
+        angle = -60,
+        extra_css = 'column-width: 2px; line-height: 100px; vertical-align:top; opacity: .5'
+    ) |>
+    column_spec(1, bold = TRUE)
+```
+
+\newpage
+
+# Class Distribution {#class_distribution}
+
+First, I set expectations with class distribution - which appears to be
+fairly uniform other than ten unrepresented species:
+
+```{r}
+leaf_df |>
+    group_by(Species) |>
+    mutate(n = n()) |>
+    ungroup() |>
+    mutate(Species = reorder(factor(Species), n)) |>
+    ggplot(aes(Species)) +
+    geom_bar() +
+    scale_y_continuous(limits = c(0,17)) +
+    labs(
+        title   = 'Leaf Species Distribution',
+        caption = sprintf(
+            'No Data for Species %s',
+            paste(setdiff(1:40, unique(leaf_df$Species)), collapse = ', ')
+        )
+    )
+```
+
+\newpage
+
+# Dimension Reduction
+
+## Near-Zero Variance
+
+Contrary to near-zero variance, this data is nearly 100% variable!
+
+```{r}
+leaf_df |> dplyr::select(-c(Species)) |>
+    summarise_all(n_distinct) |>
+    pivot_longer(everything(), names_to = 'Column', values_to = 'N_Distinct') |>
+    mutate(Variability = N_Distinct/nrow(leaf_df) * 100) |>
+    arrange(desc(N_Distinct)) |>
+    knitr::kable(digits = 2, align = 'l') |>
+    kable_styling(bootstrap_options = 'bordered')
+```
+
+\newpage
+
+## Principal Component Analysis
+
+This is promising - four PCs explain 90% of the variance; and thus `pca`
+should be a useful `preProcess` option for `train`.
+
+```{r}
+pca <- prcomp(leaf_df, scale = TRUE)
+PCs <- which(cumsum(pca$sdev^2)/sum(pca$sdev^2) < 0.90)
+barchart(
+    pca$rotation[,1:length(PCs)],
+    auto.key = TRUE,
+    main = sprintf(
+        '90%% variance PCs %s',
+        paste(PCs, collapse = ', ')
+    )
+)
+```
+
+\newpage
+
+## Correlation {#correlation}
+
+First, a hand-rolled look at correlation, having noticed that `dplyr`
+has `lag`, `lead`, and other functions analogous to familiar Oracle
+analytic functions. Here I look for columns with 75%+ correlation and
+use `lag` to filter out "duplicate" rows of a X/Y and Y/X correlations.
+
+```{r}
+cor(leaf_df) |>
+    as.data.frame() |>
+    rownames_to_column(var = 'X') |>
+    pivot_longer(cols = -c(1), names_to = 'Y', values_to = 'Correlation') |>
+    arrange(desc(Correlation)) |>
+    filter(X != Y & Y != lag(X) & Correlation > .75) |>
+    mutate(Y = reorder(factor(Y), Correlation)) |>
+    ggplot(aes(X, Correlation, fill = Y)) +
+    theme(
+        axis.text.x  = element_text(angle = 90, vjust = 0.5, hjust=1),
+        legend.title = element_blank()
+    ) +
+    geom_point(aes(color = Y), size = 5) +
+    labs(x = '', title = 'UCI Leaf Attribute Correlations > 75%')
+```
+
+\newpage
+
+### GGPAIRS
+
+With that, I look at the correlations from both directions - first the
+columns on the x-axis (plus Species, the outcome):
+
+```{r message = FALSE}
+top_x <- c(
+    'Species', 'AverageContrast', 'AverageIntensity',
+    'MaxIndentationDepth', 'Smoothness', 'Solidity', 'Uniformity'
+)
+ggpairs(leaf_df[,top_x]) + ggtitle('Top X')
+```
+
+Note, explained
+[here](https://ggobi.github.io/ggally/reference/ggally_cor.html), the
+meaning of asterisks in `ggpairs` plots:
+
+-   `***` indicates p-value \< 0.001
+-   `**` indicates p-value \< 0.01
+-   `*` indicates p-value \< 0.05
+
+\newpage
+
+And now the columns on the y-axis (again, plus Species).
+
+```{r message = FALSE}
+top_y <- c(
+    'Species', 'IsoperimetricFactor', 'Uniformity', 'Entropy', 'StochasticConvexity',
+    'ThirdMoment', 'Lobedness', 'AverageContrast', 'Smoothness'
+)
+ggpairs(leaf_df[,top_y]) + ggtitle('Top Y')
+```
+
+Conclusions from these plots:
+
+1.  No predictor has a very strong correlation with the outcome.
+2.  In relation to Species, only Uniformity has a low p-value.
+
+See also `?ggpairs` and [this
+blog](https://www.blopig.com/blog/2019/06/a-brief-introduction-to-ggpairs/)
+for customizing `ggpairs` plots. Also note, these do not plot together
+with `grid.arrange`. They can be plotted together with
+`cowplot::plot_grid`, but do not render very well.
+
+\newpage
+
+### GGCORRPLOT
+
+This plot is the clearest to me.
+
+```{r}
+leaf_correlations <- function(df) {
+    p.mat <- cor_pmat(df)   # matrix of correlation p-values
+    ggcorrplot(
+        cor(df),
+        hc.order    = TRUE,     # reorder layout with hierarchical clustering
+        hc.method   = 'median', # see ?hclust for other methods
+        lab         = TRUE,     # adds correlation coefficients
+        lab_size    = 3,
+        digits      = 1,
+        show.diag   = FALSE,    # omits self-correlation diagonal
+        p.mat       = p.mat,    # p-values
+        sig.level   = 0.001,    # p-value threshold  
+        insig       = 'blank',  # omits correlations with p-values below threshold
+        show.legend = FALSE,
+        title       = 'Leaf Feature Correlations'
+    )
+}
+leaf_correlations(leaf_df)
+```
+
+\newpage
+
+Below, I've extracted absolute correlations of .9 and 1:
+
+```{r echo = FALSE}
+data <- tibble(
+    ' ' = c(
+        'AverageIntensity', 'AverageContrast',
+        'Smoothness', 'AverageIntensity', 'ThirdMoment', 'Entropy',
+        'Smoothness', 'AverageContrast', 'Entropy',
+        'ThirdMoment', 'AverageIntensity', 'AverageContrast',
+        'Smoothness', 'AverageContrast',
+        'Solidity',
+        'StochasticConvexity', 'MaxIndentationDepth',
+        'MaxIndentationDepth'
+    ),
+    Correlation = c(
+        0.9, 0.9,
+        1, 1, 0.9, 0.9,
+        1, 1, 0.9,
+        1, 1, 1,
+        1, 0.9,
+        0.9,
+        0.9, -0.9,
+        0.9
+    )
+)
+knitr::kable(data, caption = 'Strong Correlations, Low P-Values') |>
+    pack_rows(
+        index = c(
+            'Entropy'             = 2,
+            'AverageContrast'     = 4,
+            'AverageIntensity'    = 3,
+            'Smoothness'          = 3,
+            'ThirdMoment'         = 2,
+            'StochasticConvexity' = 1,
+            'Solidity'            = 2,
+            'Lobedness'           = 1
+        ), background = 'grey'
+    ) |> kable_styling(bootstrap_options = 'bordered')
+```
+
+Conclusions from this:
+
+1.  Smoothness has a 1:1 correlation with ThirdMoment, AverageIntensity,
+    and AverageContrast, and so those three can be confidently omitted.
+2.  Aside from those, the following pairs have .9 correlation:
+    Solidity/StochasticConvexity and Lobedness/MaxIndentationDepth. Note
+    also, Solidity has a -0.9 correlation with MaxIndentationDepth. I'll
+    keep the two shorter-named columns and omit MaxIndentationDepth and
+    StochasticConvexity.
+3.  `corr` should be an effective `preProcess` option for `train`.
+
+\newpage
+
+# Partition Data
+
+Prior to testing, halve the data into train and test partitions.
+
+```{r}
+index <- createDataPartition(y = leaf_df$Species, times = 1, p = 0.5, list = FALSE)
+train <- leaf_df[index,]
+test  <- leaf_df[-index,]
+```
+
+# Baseline Models
+
+Given ~~40~~ 30 fairly evenly distributed species, the odds of guessing
+would be about 0.0333. Somewhat arbitrarily, I have chosen `lm`,
+`ranger`, and `randomForest`. Knowing I will run each in numerous
+scenarios and want to capture the metrics, I first define some
+repeatable functions and a `tibble` for tracking.
+
+First, methods for predicting and calculating RMSE and accuracy:
+
+```{r}
+predictions <- function(model, test) {
+    # TODO: handle this more elegantly with ellipsis operator
+    if (class(model)[1] == 'lm') {
+        pred <- predict(model, test, type = 'response')
+    }
+    else {
+        pred <- predict(model, test)
+    }
+    if (is.atomic(pred)) {
+        predictions <- pred
+    }
+    else {
+         predictions <- pred$predictions
+    }
+    predictions
+}
+
+rmse <- function(model, test) {
+    predictions <- predictions(model, test)
+    rmse <- sqrt(mean((predictions-test$Species)^2))
+    round(rmse, 3)
+}
+
+accuracy <- function(model, test) {
+    predictions <- predictions(model, test)
+    cm   <- confusionMatrix(predictions, factor(test$Species))
+    round(100*cm$overall[['Accuracy']], 3)
+}
+```
+
+\newpage
+
+Now repeatable methods for the models.
+
+```{r}
+lm__ <- function(train, test, formula = as.formula(Species ~ .)) {
+    fit <- lm(formula, train)
+    rmse(fit, test)
+}
+
+ranger__r <- function(train, test, formula = as.formula(Species ~ .)) {
+    fit <- ranger(formula, train)
+    rmse(fit, test)
+}
+
+ranger__c <- function(train, test, formula = as.formula(factor(Species) ~ .)) {
+    fit <- ranger(formula, train)
+    accuracy(fit, test)
+}
+
+rf__r <- function(train, test, formula = as.formula(Species ~ .)) {
+    fit <- randomForest(formula, train, ntree = 20)
+    rmse(fit, test)
+}
+
+rf__c <- function(train, test, formula = as.formula(factor(Species) ~ .)) {
+    fit <- randomForest(formula, train, ntree = 20)
+    accuracy(fit, test)
+}
+```
+
+Finally, a `tibble` for tracking and methods for displaying it.
+
+```{r}
+model_results <- tibble(
+    Model    = character(),
+    RMSE     = double(),
+    Accuracy = double()
+)
+
+rows_per <- function() { as.integer(nrow(model_results)/3) }
+
+model_summary <- function() {
+    n <- rows_per()
+    knitr::kable(model_results, align = c('l', 'r', 'r'), digits = 3) |>
+    kable_styling(bootstrap_options = 'bordered') |>
+    pack_rows(index = c(lm = n, ranger = n, randomForest = n), background = 'grey') |>
+    add_header_above(c(' ', 'Regression' = 1, 'Classification' = 1), align = 'r')
+}
+```
+
+\newpage
+
+Now I run the three models and capture their RMSE/Accuracy metrics.
+
+```{r message = FALSE}
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = 'baseline',
+        RMSE     = lm__(train, test),
+        Accuracy = NULL
+    )
+)
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = 'baseline',
+        RMSE     = ranger__r(train, test),
+        Accuracy = ranger__c(train, test)
+    )
+)
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = 'baseline',
+        RMSE     = rf__r(train, test),
+        Accuracy = rf__c(train, test)
+    )
+)
+
+model_summary()
+```
+
+\newpage
+
+# Centering
+
+Centering the data is often recommended; let us see the effect.
+
+```{r}
+train_ctr <- train |> mutate(across(-c(Species), ~ scale(.x, center=TRUE, scale=FALSE)))
+test_ctr  <- test  |> mutate(across(-c(Species), ~ scale(.x, center=TRUE, scale=FALSE)))
+
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = 'centering',
+        RMSE     = lm__(train_ctr, test_ctr),
+        Accuracy = NULL
+    ),
+    .after = rows_per()
+)
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = 'centering',
+        RMSE     = ranger__r(train_ctr, test_ctr),
+        Accuracy = ranger__c(train_ctr, test_ctr)
+    ),
+    .after = 2 * rows_per() + 1
+)
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = 'centering',
+        RMSE     = rf__r(train_ctr, test_ctr),
+        Accuracy = rf__c(train_ctr, test_ctr)
+    )
+)
+model_summary()
+```
+
+Inconclusive at best. I may revisit centering as a `preProcess` for
+`train`, with low expectations.
+
+```{r}
+rm(train_ctr, test_ctr)
+```
+
+\newpage
+
+# Removing Highly Correlated Columns
+
+Earlier I noted some highly correlated columns. Perhaps removing them
+will help. Here I use a set operation to omit them from the column list,
+and rerun the models.
+
+```{r}
+high_corr <- c(
+    'ThirdMoment', 'AverageIntensity', 'AverageContrast',  # 100% with Smoothness
+    'MaxIndentationDepth',                                 # 90% with Lobedness
+    'StochasticConvexity'                                  # 90% with Solidity
+)
+cols <- setdiff(names(leaf_df), high_corr)
+
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = '<90% correlation',
+        RMSE     = lm__(train[,cols], test[,cols]),
+        Accuracy = NULL
+    ),
+    .after = rows_per()
+)
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = '<90% correlation',
+        RMSE     = ranger__r(train[,cols], test[,cols]),
+        Accuracy = ranger__c(train[,cols], test[,cols])
+    ),
+    .after = 2 * rows_per() + 1
+)
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = '<90% correlation',
+        RMSE     = rf__r(train[,cols], test[,cols]),
+        Accuracy = rf__c(train[,cols], test[,cols])
+    )
+)
+model_summary()
+```
+
+Improvements in some cases. Worth revisiting, and comparing with `corr`
+option for `preProcess`.
+
+\newpage
+
+# Removing High VIF
+
+[Evidently](https://en.wikipedia.org/wiki/Variance_inflation_factor)
+variance inflation factor provides a measure of collinearity. We can see
+the values with `vif` against an `lm` object.
+
+```{r}
+lm_obj <- lm(Species ~ ., train)
+vif(lm_obj) |>
+    as.data.table(keep.rownames = TRUE) |>
+    arrange(desc(V2)) |>
+    knitr::kable(col.names = c('Column', 'VIF')) |>
+    kable_styling(bootstrap_options = c('bordered', 'striped', 'condensed'))
+```
+
+Let's see if removing the top few makes a difference.
+
+```{r}
+high_vif <- vif(lm_obj) |>
+    as.data.frame() |>
+    rownames_to_column(var = 'Column') |>
+    slice_max(pick(2), n = 3) |>
+    pull(Column)
+cols <- setdiff(names(train), high_vif)
+```
+
+\newpage
+
+```{r}
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = 'minus top 3 VIF',
+        RMSE     = lm__(train[,cols], test[,cols]),
+        Accuracy = NULL
+    ),
+    .after = rows_per()
+)
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = 'minus top 3 VIF',
+        RMSE     = ranger__r(train[,cols], test[,cols]),
+        Accuracy = ranger__c(train[,cols], test[,cols])
+    ),
+    .after = 2 * rows_per() + 1
+)
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = 'minus top 3 VIF',
+        RMSE     = rf__r(train[,cols], test[,cols]),
+        Accuracy = rf__c(train[,cols], test[,cols])
+    )
+)
+model_summary()
+```
+
+Mixed results.
+
+\newpage
+
+# Removing Outliers and Extreme Values
+
+I happened upon `rstatix::identify_outliers`, and from there
+`is_outlier` and `is_extreme`. Here I experiment by nullifying such
+values with the intent of replacing them with `preProcess` methods
+`medianImpute`, `bagImpute`, and `knnImpute`.
+
+```{r}
+# identify and nullify outliers - other than first column, Species
+train_o      <- train |> as.matrix()
+outliers     <- rstatix::is_outlier(train_o)
+idx          <- which(outliers[,2:15])
+train_o[idx] <- NA
+train_o      <- train_o |> as.data.frame()
+
+# create second data frame with extreme values also nullified
+train_x      <- train_o |> as.matrix()
+xtreme       <- rstatix::is_extreme(train_x)
+idx          <- which(xtreme[,2:15])
+train_x[idx] <- NA
+train_x      <- train_x |> as.data.frame()
+```
+
+Anxious to see the effect, I want to do some early analysis that
+requires no NAs! For that, I found `missMethods::impute_mean`. Note, the
+default implementation has `type = 'columnwise'` - which seems logical,
+to replace an NA with the overall mean of its column. There are also
+`'rowwise'`, `'total'`, '`Winer'`, and `'Two-Way'` - see [the
+documentation](https://search.r-project.org/CRAN/refmans/missMethods/html/impute_mean.html)
+for details.
+
+```{r}
+imp <- impute_mean(train_x)
+pca <- prcomp(imp, scale = TRUE)
+PCs <- which(cumsum(pca$sdev^2)/sum(pca$sdev^2) < 0.90)
+barchart(
+    pca$rotation[,1:length(PCs)],
+    auto.key = TRUE,
+    main = sprintf(
+        'Omitted Outliers & Extremes\n90%% variance PCs %s',
+        paste(PCs, collapse = ', ')
+    )
+)
+```
+
+```{r}
+leaf_correlations(imp)
+```
+
+Mean imputation added a fifth PC to explain 90% variation; and made a
+visible shift to the correlation plot - there are fewer correlations of
+.9 and 1 and 50% more white space. What might it mean for accuracy...?
+
+# Improve with train()
+
+Perhaps we can make improvements with `train` and its `trControl`,
+`preProcess`, and `tuneGrid`.
+
+First I define a `trainControl` object to be used for all.
+
+```{r}
+trControl <- trainControl(
+    method          = 'cv',    # cross-validation
+    number          = 2,       # two repetitions, atop whatever tuneGrid dictates
+    p               = .5,      # 50% training portion
+    savePredictions = 'final'  # train_obj$results$pred
+)
+```
+
+## train LM
+
+```{r}
+lm_obj <- train(
+    Species ~ .,
+    method     = 'lm',
+    data       = train,
+    trControl  = trControl,
+    preProcess = c('pca', 'corr'),
+    tuneGrid   = data.frame(intercept = c(TRUE, FALSE))
+)
+
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = 'train()',
+        RMSE     = rmse(lm_obj, test),
+        Accuracy = NA
+    ),
+    .after = rows_per()
+)
+```
+
+\newpage
+
+## train Ranger
+
+```{r warning = FALSE}
+ranger_objr <- train(
+    Species ~ .,
+    method     = 'ranger',
+    data       = train,
+    trControl  = trControl,
+    preProcess = c('pca', 'corr'),
+    importance = 'permutation',
+    replace    = TRUE,
+    tuneGrid   = expand.grid(
+        mtry          = c(1,3,5),
+        splitrule     = c('variance', 'extratrees', 'maxstat'),
+        min.node.size = c(5,10,15)
+    )
+)
+
+ranger_objc <- train(
+      factor(Species) ~ .,
+      method     = 'ranger',
+      data       = train,
+      trControl  = trControl,
+      preProcess = c('pca', 'corr'),
+      importance = 'permutation',
+      replace    = TRUE,
+      tuneGrid   = expand.grid(
+          mtry          = c(1,3,5),
+          splitrule     = c('gini', 'extratrees'),
+          min.node.size = c(1,3)
+      )
+)
+
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = 'train()',
+        RMSE     = rmse(ranger_objr, test),
+        Accuracy = accuracy(ranger_objc, test)
+    ),
+    .after = 2 * rows_per() + 1
+)
+```
+
+\newpage
+
+## train RandomForest
+
+```{r warning = FALSE}
+rf_objr <- train(
+    Species ~ .,
+    method   = 'rf',
+    data     = train,
+    trControl = trControl,
+    preProcess = c('pca', 'corr'),
+    tuneGrid   = data.frame(mtry = seq(6,10,1))
+)
+
+rf_objc <- train(
+    factor(Species) ~ .,
+    method     = 'rf',
+    data       = train,
+    trControl  = trControl,
+    preProcess = c('pca', 'corr'),
+    tuneGrid   = data.frame(mtry = seq(6,10,1))
+)
+
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = 'train()',
+        RMSE     = rmse(rf_objr, test),
+        Accuracy = accuracy(rf_objc, test)
+    )
+)
+model_summary()
+```
+
+The results are disappointing; but there are more training options to
+pursue.
+
+\newpage
+
+# Further Analysis
+
+## RandomForest Decision Tree {#decision_tree}
+
+The `reprtree` package enables the plotting of a randomForest decision
+tree, which gives insight into the model's thinking. Note, documentation
+suggests that the `plot.getTree` ellipsis passes arguments to
+`text.tree` - but its `pretty` and `digits` arguments are quietly
+ineffective and `splits` gives an error. And, real estate vs resolution
+is challenging: setting `fig.height` improves the layout but decreases
+the text size; setting `depth` helps, but at the cost of lower leaf
+nodes.
+
+```{r message = FALSE, fig.width = 10, fig.height = 10}
+fit <- randomForest(factor(Species) ~ ., train, ntree = 20)
+simplest_tree <- which.min(fit$forest$ndbigtree)
+fit$forest$xbestsplit <- round(fit$forest$xbestsplit, 3)  # 'digits' workaround
+plot.getTree(
+    fit,
+    k     = simplest_tree,
+    depth = 7,
+    main  = 'RandomForest Decision Tree'
+)
+```
+
+Trying to mimic that with `dplyr` methods would result in one dense,
+arbitrary-looking `if-else` condition!
+
+\newpage
+
+## Ranger Predictions vs Observations
+
+Choosing ranger arbitrarily, I look at its predictions versus the actual
+observations. It looks uniformly off, which seems reasonable to me given
+the complexity and near-complete variability of the data.
+
+```{r}
+p1 <- ranger_objr$pred |> as.data.frame() |>
+    dplyr::select(pred, obs) |>
+    ggplot(aes(obs, pred)) +
+    geom_point() +
+    scale_x_continuous(breaks = c(1:15,22:36)) +
+    geom_smooth(method = 'loess', formula = 'y~x')
+p2 <- ranger_objr$pred |> as.data.frame() |>
+    dplyr::select(pred, obs) |>
+    ggplot(aes(obs, pred, group = obs)) +
+    geom_boxplot(varwidth = TRUE) +
+    scale_x_continuous(breaks = c(1:15,22:36))
+grid.arrange(
+    p1, p2, nrow = 2,
+    top = textGrob(
+        "Ranger Regression",
+        gp = gpar(fontsize = 12, font = 3)
+    ) 
+)
+```
+
+\newpage
+
+## Other Metrics
+
+Evidently `ranger` is strong in Specificity (predicting true positives)
+and relatively weak in Sensitivity (not predicting false positives).
+
+```{r}
+metrics <- c('Sensitivity', 'Specificity', 'Prevalence', 'Precision')
+fit     <- ranger(factor(Species) ~ ., train)
+pred    <- predict(fit, test)
+cm      <- confusionMatrix(pred$predictions, factor(test$Species))
+cm$byClass |> as.data.frame() |>
+    select(all_of(metrics)) |>
+    rownames_to_column(var = 'Species') |>
+    mutate(
+        Species = names[str_extract(Species, '\\d+')],
+        F1 = 2 * ((Precision*Sensitivity)/(Precision+Sensitivity))
+    ) |>
+    knitr::kable(digits = 3, caption = 'Ranger Classification Metrics') |>
+    kable_styling(bootstrap_options = 'bordered')
+```
+
+\newpage
+
+## LM Autoplot {#lm_autoplot}
+
+From [this
+write-up](https://www.modernstatisticswithr.com/regression.html), which
+I've referenced in other projects, I've paraphrased some potential
+observations to be made from the plots. Note, these are designed to be
+plotted together, e.g. `which = 1:6`, but do not render all that well
+here.
+
+### Autoplot - "Residuals vs Fitted"
+
+```{r}
+fit  <- lm(Species ~ ., train)
+autoplot(fit, which = 1, ncol = 1, label.size = 3, label.colour = 'red', alpha = .5)
+```
+
+-   *Look for patterns that can indicate non-linearity, e.g. high in
+    some areas and low in others.* **Yes, a high blob and a low blob;
+    thus non-linearity?**
+-   *Blue line should be close to straight.* **When these were all
+    plotted together, I judged the line to be straight, but not now.**
+
+\newpage
+
+### Autoplot - "Normal Q-Q"
+
+```{r}
+autoplot(fit, which = 2, ncol = 1, label.size = 3, label.colour = 'red', alpha = .5)
+```
+
+-   *Points follow the line, estimates of random errors follow a normal
+    distribution.* **Again, when all plotted together, the points
+    *seemed* to follow the line quite well. Now, I would say the ends
+    drift away too much.**
+
+\newpage
+
+### Autoplot - "Scale-Location"
+
+```{r}
+autoplot(fit, which = 3, ncol = 1, label.size = 3, label.colour = 'red', alpha = .5)
+```
+
+-   *Residuals varying more for large fitted values is a sign of
+    heteroscedasticity.* **Residuals vary all along, and mostly near the
+    middle.**
+-   *Horizontal blue line is a sign of homoscedasticity (both defined
+    [here](https://en.wikipedia.org/wiki/Homoscedasticity_and_heteroscedasticity)).*
+    **Not horizontal; and coupled with the above, I reckon this is
+    heteroscedasticity.**
+
+\newpage
+
+### Autoplot - "Cook's Distance"
+
+```{r}
+autoplot(fit, which = 4, ncol = 1, label.size = 3, label.colour = 'red', alpha = .5)
+```
+
+-   *Points with high values (rule of thumb, above 1) indicate high
+    influence.* **Nothing close to 1, but there are certainly some
+    outliers.**
+
+\newpage
+
+### Autoplot - "Residuals vs Leverage"
+
+```{r}
+autoplot(fit, which = 5, ncol = 1, label.size = 3, label.colour = 'red', alpha = .5)
+```
+
+-   *High residual, low leverage indicates deviation from the model with
+    little influence.* **Assuming "high" is above the faint dashed line,
+    yes there is a clump with high residual and low(?) leverage.**
+
+-   *High residual, high leverage indicates strong influence on the
+    fitted model.* **No, I would say everything with high leverage has
+    moderate to low residuals.**
+
+\newpage
+
+### Autoplot - "Cook's Distance vs Leverage"
+
+```{r}
+autoplot(fit, which = 6, ncol = 1, label.size = 3, label.colour = 'red', alpha = .5)
+```
+
+-   *High distance and high leverage indicate strong influence on fitted
+    model.* **Tilia 97 is high/high - but truly or just relatively?**
+
+\newpage
+
+### Autoplot - All Together, Without Outliers
+
+For no reason I can explain, even with `set.seed`, the specifics vary in
+these plots every run. But, over many runs, there is definite
+repetition - usually Tilia tomentosa, Geranium sp, and Quercus suber,
+and less often Corylus avellana, Crataegus monogyna, Nerium oleander,
+and Urtica dioica.
+
+Below are many of the rows that have been repeatedly highlighted. While
+some of the column values *look* very large or small, they are not when
+compared to the `max` or `min` values of the same columns. (For the
+record, I am familiar with Tilia (Linden) and its fragrant flowers.)
+
+```{r}
+recurring_outliers <- c(
+    'Quercus suber 6', 'Quercus suber 7', 'Quercus suber 9', 'Quercus suber 10',
+    'Geranium sp 331', 'Geranium sp 340',
+    'Tilia tomentosa 97', 'Tilia tomentosa 108',
+    'Crataegus monogyna 54', 'Corylus avellana 148'
+)
+data <- train |> filter(row.names(train) %in% recurring_outliers) |>
+    rownames_to_column(var = 'GenusSpecimen') |>
+    mutate(GenusSpecimen = sub(' [a-z]+ ', ' ... ', GenusSpecimen)) |>
+    select(-c(Species))
+
+knitr::kable(data, digits = 2, align = 'c', caption = 'Recurring Autoplot Outliers') |>
+    kable_styling(bootstrap_options = 'bordered') |>
+    row_spec(
+        0,
+        angle = -60,
+        extra_css = 'line-height: 100px; column-width: 2px; opacity: .5'
+    ) |>
+    column_spec(1, bold = TRUE, extra_css = 'text-align: left') |>
+    column_spec(2:ncol(data), border_left = TRUE)
+```
+
+\newpage
+
+Below I filter out those rows and re-plot. Again, these are difficult to
+see all together. I hoped to plot the originals and these side-by-side
+with `gridExtra` or `cowplot`, but it is not that straightforward if
+even possible. I did plot these individually and eyeballed against the
+originals and there seems to be an overall effect/improvement: generally
+points shifted slightly down and leftward. Most notably, the y-axis
+scales shrank for the two Cook's plots.
+
+```{r}
+fit <- lm(Species ~ ., train |> filter(!row.names(train) %in% recurring_outliers))
+autoplot(fit, which = 1:6, ncol = 3, label.size = 3, label.colour = 'red', alpha = .5)
+```
+
+\newpage
+
+### Removing Recurring Autoplot Outliers
+
+```{r}
+tmp <- train |> filter(!row.names(train) %in% recurring_outliers)
+
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = 'w/o autoplot outliers',
+        RMSE     = lm__(tmp, test),
+        Accuracy = NULL
+    ),
+    .after = rows_per()
+)
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = 'w/o autoplot outliers',
+        RMSE     = ranger__r(tmp, test),
+        Accuracy = ranger__c(tmp, test)
+    ),
+    .after = 2 * rows_per() + 1
+)
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = 'w/o autoplot outliers',
+        RMSE     = rf__r(tmp, test),
+        Accuracy = rf__c(tmp, test)
+    )
+)
+```
+
+\newpage
+
+Minimal and mixed results.
+
+```{r}
+model_summary()
+```
+
+\newpage
+
+# RowSDs and ColSDs
+
+Here I plot `rowSDs` vs Species - and there are two or three pronounced
+genuses - 34 (*Pseudosasa japonica*), 31 (*Podocarpus sp*), and to a
+lesser extend, 8 (*Nerium oleander*).
+
+```{r}
+x  <- train$Species
+y  <- rowSds(train[,2:15] |> as.matrix())   # visibly same with rowSums
+ggplot() + 
+    geom_boxplot(aes(x, y, group = x)) +
+    scale_x_continuous(
+        breaks = c(1:15,22:36),
+        labels = as.vector(names)
+    ) +
+    theme(axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1)) +
+    labs(x = '', y = 'rowSds')
+```
+
+\newpage
+
+Anything to glean from columns?
+
+```{r warning = FALSE}
+colSds(train[,2:15] |>
+    as.matrix()) |>
+    as.data.frame() |>
+    rownames_to_column(var = 'Column') |>
+    mutate(colSd = cur_data_all()[[2]]) |>
+    select(-c(2)) |>
+    arrange(desc(colSd)) |>
+    knitr::kable() |>
+    kable_styling(bootstrap_options = c('bordered', 'striped', 'condensed'))
+```
+
+Intuitively, and cross-referencing with the [RandomForest decision
+tree](#decision_tree), it seems plausible that the columns with very low
+standard deviations are not useful predictors. Perhaps `colSDs` for
+continuous data can be considered analogous to `nearZeroVar` for
+discrete data. That seems consistent with RMSE (proximity) vs. Accuracy
+(binary, right or wrong).
+
+\newpage
+
+I'll try the models again after removing columns with SDs below 0.1.
+
+```{r}
+low_sds <- colSds(train[,2:15] |>
+    as.matrix()) |>
+    as.data.frame() |>
+    rownames_to_column(var = 'Column') |>
+    mutate(colSd = cur_data_all()[[2]]) |>
+    filter(colSd < 0.1) |>
+    pull(Column)
+tmp <- train |> select(-c(all_of(low_sds)))
+
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = '<0.1 SD',
+        RMSE     = lm__(tmp, test),
+        Accuracy = NULL
+    ),
+    .after = rows_per()
+)
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = '<0.1 SD',
+        RMSE     = ranger__r(tmp, test),
+        Accuracy = ranger__c(tmp, test)
+    ),
+    .after = 2 * rows_per() + 1
+)
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = '<0.1 SD',
+        RMSE     = rf__r(tmp, test),
+        Accuracy = rf__c(tmp, test)
+    )
+)
+```
+
+\newpage
+
+Again, mixed and minimal results.
+
+```{r}
+model_summary()
+```
+
+\newpage
+
+# Formula Modifications
+
+To date, I've only experimented rather blindly with formulas. At this
+point, `train` has three pairs with absolute correlation at or above
+.75: IsoperimetricFactor/Solidity (0.75), Lobedness/Solidity (-0.81),
+and Elongation/IsoperimetricFactor (-0.80). Here I try factor-crossing
+those pairs.
+
+```{r}
+fc <- as.formula(
+    factor(Species) ~ IsoperimetricFactor*Solidity
+            + Lobedness*Solidity
+            + Elongation*IsoperimetricFactor
+            + .
+)
+fr <- as.formula(
+    Species ~ IsoperimetricFactor*Solidity
+            + Lobedness*Solidity
+            + Elongation*IsoperimetricFactor
+            + .
+)
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = 'factor crossing',
+        RMSE     = lm__(train, test, formula = fr),
+        Accuracy = NULL
+    ),
+    .after = rows_per()
+)
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = 'factor crossing',
+        RMSE     = NULL, # One or more independent variables not found
+        Accuracy = NULL  # ditto
+    ),
+    .after = 2 * rows_per() + 1
+)
+model_results <- model_results |> add_row(
+    tibble_row(
+        Model    = 'factor crossing',
+        RMSE     = rf__r(train, test, formula = fr),
+        Accuracy = rf__c(train, test, formula = fc)
+    )
+)
+```
+
+\newpage
+
+Noted in the code above, `ranger` gives an error. For the other two,
+mixed and minimal results.
+
+```{r}
+model_summary()
+```
+
+\newpage
+
+# Other Models
+
+Here I just try other models I've experimented with in the past, hoping
+one will be a standout fit for this data. This is the first use case
+I've had for `mapply`, to pass TWO lists to a function. Straightforward,
+though I had to change `tuning` from `c()` to `list()`.
+
+### Other Regression Models - glm, knn, rlm
+
+```{r warning = FALSE, message = FALSE, error = FALSE}
+models <- c('glm', 'knn', 'rlm')
+tuning <- list(
+    glm = data.frame(parameter = 'none'),
+    knn = data.frame(k=seq(1,10,.5)),
+    rlm = expand.grid(
+        intercept = c(TRUE, FALSE),
+        psi       = c('psi.huber', 'psi.hampel', 'psi.bisquare')
+    )
+)
+
+mapply(function(model, tune) {
+    fit <- train(
+          Species ~ .,
+          method     = model,
+          data       = train,
+          trControl  = trControl,
+          tuneGrid   = tune,
+          preProcess = c('pca', 'corr')
+    )
+    rmse = rmse(fit, test)
+    c(model = rmse)
+}, models, tuning[c(models)])
+```
+
+`knn` is a regression contender.
+
+\newpage
+
+### Other Classification Models - multinom, Rborist, mlp, wsrf
+
+```{r warning = FALSE}
+models <- c('multinom', 'Rborist', 'mlp', 'wsrf')
+tuning <- list(
+    multinom = data.frame(decay = c(.01, .1, .5, .75)),
+    Rborist  = expand.grid(
+        predFixed = c(2,20),
+        minNode   = c(2,5,10)
+    ),
+    mlp      = data.frame(size = c(1,5,10)),
+    wsrf     = data.frame(mtry = c(1,2,5,10))
+)
+
+mapply(function(model, tune) {
+    fit <- train(
+          factor(Species) ~ .,
+          method     = model,
+          data       = train,
+          trControl  = trControl,
+          tuneGrid   = tune,
+          preProcess = c('pca', 'corr'),
+          trace      = FALSE
+    )
+    accuracy <- accuracy(fit, test)
+    c(model = accuracy)
+}, models, tuning[c(models)])
+```
+
+`multinom` is a classification contender.
+
+\newpage
+
+# Final Four
+
+Here I take another look at the top two classification models,
+`multinom` and `ranger`, and top two regression models, `knn` and
+`randomForest`.
+
+```{r}
+models  <- c('multinom', 'ranger', 'knn', 'rf')
+```
+
+What other dials can I turn?
+
+## tuneGrid Parameters
+
+Here I establish a list of `tuneGrid` objects for the four models.
+
+```{r}
+tuning  <- list(
+    multinom = data.frame(decay = seq(.0020,.0040,.0002)),
+    ranger   = expand.grid(
+          mtry          = c(1,2,3),
+          splitrule     = c('gini', 'extratrees'),
+          min.node.size = seq(1,5,1)
+    ),
+    knn      = data.frame(k = seq(1,10,.5)),
+    rf       = data.frame(mtry = seq(1,5,.1))
+)
+```
+
+## preProcess Methods
+
+And here, a list of experimental `preProcess` vectors for the models.
+
+```{r}
+preprocesses <- list(
+    multinom = c('pca'),
+    ranger   = c('pca', 'BoxCox'),
+    knn      = c('pca', 'corr', 'expoTrans'),
+    rf       = c('pca', 'YeoJohnson')
+)
+```
+
+\newpage
+
+## Formula Variations
+
+Here I define three pairs of formulas, for [c]{.underline}lassification
+and [r]{.underline}egression.
+
+```{r}
+formulas <- list(
+    c1 = as.formula(factor(Species) ~ .),
+    r1 = as.formula(Species ~ .),
+    c2 = as.formula(
+        factor(Species) ~ IsoperimetricFactor * Solidity
+            + Lobedness * Solidity
+            + Elongation * IsoperimetricFactor
+            + .
+    ),
+    r2 = as.formula(
+        Species ~ IsoperimetricFactor * Solidity
+            + Lobedness * Solidity
+            + Elongation * IsoperimetricFactor
+            + .
+    ),
+    c3 = as.formula(
+        factor(Species) ~ IsoperimetricFactor * Solidity
+            + Lobedness * Solidity
+            + Elongation * IsoperimetricFactor
+            + I(Eccentricity^3)
+            + .
+    ),
+    r3 = as.formula(
+        Species ~ IsoperimetricFactor * Solidity
+            + Lobedness * Solidity
+            + Elongation * IsoperimetricFactor
+            + I(Eccentricity^3)
+            + .
+    )
+)
+```
+
+\newpage
+
+## Execute with mapply
+
+Here I use `mapply` and an anonymous function to do most of the work,
+wrapped with an outer function to make the arguments flexible.
+
+```{r warning = FALSE}
+execute_models <- function(
+    .train        = train,
+    .test         = test,
+    .formulas     = formulas[c('c2', 'c2', 'r2', 'r2')],
+    .tuning       = tuning[c(models)],
+    .preprocesses = preprocesses[c(models)]
+) {
+    results <- vector()
+    results <- mapply(function(model, tune, formula, pre) {
+        fit <- train(
+              formula,
+              method        = model,
+              data          = .train,
+              trControl     = trControl,
+              tuneGrid      = tune,
+              preProcess    = pre,
+              trace         = FALSE,
+              cutoff        = .9,  # correlation cutoff, default 90%
+              thresh        = .8,  # PCA threshold, default 95%
+              na.action     = na.pass
+        )
+        if (fit$modelType == 'Regression') {
+            metric <- rmse(fit, .test)
+        }
+        else {
+            metric <- accuracy(fit, .test)
+        }
+        results <- append(results, metric)
+    },
+        models,
+        .tuning,
+        .formulas,
+        .preprocesses
+    )
+    return(bind_rows(results))
+}
+```
+
+\newpage
+
+Now execute the models with various arguments.
+
+```{r warning = FALSE}
+metrics <- execute_models()
+metrics <- rbind(metrics, execute_models(
+    train |> select(-c(all_of(low_sds)))
+))
+metrics <- rbind(metrics, execute_models(
+    train |> filter(!row.names(train) %in% recurring_outliers)
+))
+metrics <- rbind(metrics, execute_models(
+    train |> select(-c(all_of(high_corr)))
+))
+metrics <- rbind(metrics, execute_models(
+    .train    = train |> select(-c(all_of(high_corr))),
+    .formulas = formulas[c('c1','c1','r1','r1')]
+))
+metrics <- rbind(metrics, execute_models(
+    .train     = train |> select(-c(all_of(high_vif))),
+    .formulas = formulas[c('c1','c1','r1','r1')]
+))
+metrics <- rbind(metrics, execute_models(
+    .train    = train |> select(-c(all_of(high_vif))),
+    .formulas = formulas[c('c3','c1','r3','r3')]
+))
+metrics <- rbind(metrics, execute_models(
+    .train    = train,
+    .formulas = formulas[c('c3','c1','r3','r3')]
+))
+metrics <- rbind(metrics, execute_models(
+    train |> mutate(across(-c(Species), ~ scale(.x, center=TRUE, scale=FALSE))),
+    test  |> mutate(across(-c(Species), ~ scale(.x, center=TRUE, scale=FALSE)))
+))
+metrics <- rbind(metrics, execute_models(
+    train |> mutate(across(-c(Species), ~ scale(.x, center=TRUE, scale=TRUE))),
+    test  |> mutate(across(-c(Species), ~ scale(.x, center=TRUE, scale=TRUE)))
+))
+metrics <- rbind(metrics, execute_models(
+    train |> select(-c(all_of(high_corr))) |>
+             mutate(across(-c(Species), ~ scale(.x, center=TRUE, scale=FALSE))),
+    test  |> mutate(across(-c(Species), ~ scale(.x, center=TRUE, scale=FALSE)))
+))
+metrics <- rbind(metrics, execute_models(
+    .train    = train_x,
+    .formulas = formulas[c('c1','c1','r1','r1')],
+    .pre      = list(
+        multinom = c('pca', 'corr', 'medianImpute'),
+        ranger   = c('pca', 'corr', 'medianImpute'),
+        knn      = c('pca', 'corr', 'medianImpute'),
+        rf       = c('pca', 'corr', 'medianImpute')
+    )
+))
+metrics <- rbind(metrics, execute_models(
+    .train    = train_x,
+    .formulas = formulas[c('c1','c1','r1','r1')],
+    .pre      = list(
+        multinom = c('pca', 'corr', 'bagImpute'),
+        ranger   = c('pca', 'corr', 'bagImpute'),
+        knn      = c('pca', 'corr', 'bagImpute'),
+        rf       = c('pca', 'corr', 'bagImpute')
+    )
+))
+metrics <- rbind(metrics, execute_models(
+    .train    = train_o,
+    .formulas = formulas[c('c1','c1','r1','r1')],
+    .pre      = list(
+        multinom = c('pca', 'corr', 'medianImpute'),
+        ranger   = c('pca', 'corr', 'medianImpute'),
+        knn      = c('pca', 'corr', 'medianImpute'),
+        rf       = c('pca', 'corr', 'medianImpute')
+    )
+))
+metrics <- rbind(metrics, execute_models(
+    .train    = train_o,
+    .formulas = formulas[c('c1','c1','r1','r1')],
+    .pre      = list(
+        multinom = c('pca', 'corr', 'bagImpute'),
+        ranger   = c('pca', 'corr', 'bagImpute'),
+        knn      = c('pca', 'corr', 'bagImpute'),
+        rf       = c('pca', 'corr', 'bagImpute')
+    )
+))
+```
+
+\newpage
+
+And the results:
+
+```{r}
+metrics |> add_column(
+    summary = c(
+        'basic', 'omit low SDs', 'omit recurring outliers',
+        'omit high correlation', 'omit high correlation, v1 formula',
+        'omit high VIF, v1 formula', 'omit high VIF, v3 formula',
+        'v3 formula', 'centered', 'centered and scaled',
+        'omit high correlation, centered',
+        'medianImpute extremes', 'bagImpute extremes',
+        'medianImpute outliers/extremes', 'bagImpute outliers/extremes'
+    ),
+    .before = 1
+) |> knitr::kable() |> kable_styling(bootstrap_options = 'bordered')
+```
+
+Note, `knnImpute` gave "Something is wrong; all the Accuracy metric
+values are missing". I looked into it lightly, especially
+[here](https://stackoverflow.com/questions/52303475/error-using-caret-package-with-knn-method-something-is-wrong-all-the-accur) -
+and tried adding `'center', 'scale'` to the mix and increased `k` from
+default 5 to to 10, to no avail.
+
+More notably, `'medianImpute'` and `'bagImpute'` failed also until I
+added `'na.action = na.pass'`. That almost feels like a bug, or at least
+a missed feature - that NAs should be allowed if one is trying to impute
+[them]. I will be poking around github for the source code and look to
+make a patch.
+
+\newpage
+
+# Final One - multinom
+
+Here I focus on `multinom`, which generally looks best. Notably,
+`multinom` supports case weights, to help control how observations
+effect the model. I experiment with weights here, and also with `rowSds`
+and `colSds` as a proxy for volatility.
+
+```{r}
+row_sds    <- rowSds(train[,2:15] |> as.matrix())
+col_sds    <- colSds(train[,2:15] |> as.matrix())
+f_weights  <- train |> group_by(Species) |> mutate(n = n()) |> pull(n)
+p_weights  <- parsnip::importance_weights(row_sds) |> as.double()
+sd_weights <- row_sds
+row_sds    <- row_sds |> as.data.table(keep.rownames = TRUE)
+col_sds    <- col_sds |> as.data.table(keep.rownames = TRUE)
+
+most_volatile_rows <- row_sds |>
+    slice_max(order_by = row_sds, n = 5) |> pull(rn)
+
+least_volatile_rows <- row_sds |>
+    slice_min(order_by = row_sds, n = 5) |>  pull(rn)
+
+most_volatile_columns <- col_sds |>
+    slice_max(order_by = col_sds, n = 5) |>  pull(rn)
+
+least_volatile_columns <- col_sds |>
+    slice_min(order_by = col_sds, n = 5) |>  pull(rn)
+```
+
+## Multinom via Train
+
+I tried to construct permutations of formulas, `tuneGrid`, and
+`preProcess` with `expand.grid` - and it looked fine to me as a data
+frame but something about it wasn't playing well with `train`.
+
+```{r warning = FALSE}
+execute_multinom <- function(
+        .formula = formulas[['c1']],
+        .tune    = data.frame(decay = .0033),
+        .pre     = c('pca', 'corr'),
+        .train   = train,
+        .test    = test,
+        .weights = vector()
+    ) {
+    fit <- train(
+          .formula,
+          method       = 'multinom',
+          data         = .train,
+          trControl    = trControl,
+          tuneGrid     = .tune,
+          preProcess   = .pre,
+          trace        = FALSE,
+          case.weights = .weights
+    )
+    return(accuracy(fit, .test))
+}
+```
+
+\newpage
+
+Now to run with various arguments.
+
+```{r warning = FALSE}
+metrics <- vector()
+metrics <- append(metrics, c(
+    execute_multinom(),
+    execute_multinom(.weights = f_weights),
+    execute_multinom(.weights = p_weights),
+    execute_multinom(.formula = formulas[['c2']]),
+    execute_multinom(.formula = formulas[['c3']]),
+    execute_multinom(
+        .train = train|> select(-c(all_of(high_corr)))
+    ),
+    execute_multinom(.pre = c('pca', 'corr', 'scale', 'center')),
+    execute_multinom(.pre = c('pca', 'corr', 'BoxCox')),
+    execute_multinom(.pre = c('pca', 'corr', 'YeoJohnson')),
+    execute_multinom(.pre = c('pca', 'corr', 'expoTrans')),
+    execute_multinom(
+        .train = train |> filter(!rownames(train) %in% c(most_volatile_rows))
+    ),
+    execute_multinom(
+        .train = train |> filter(!rownames(train) %in% c(least_volatile_rows))
+    ),
+    execute_multinom(
+        .train = train |> select(-c(all_of(most_volatile_columns)))
+    ),
+    execute_multinom(
+        .train = train |> select(-c(all_of(least_volatile_columns)))
+    ),
+    execute_multinom(
+        .train = impute_mean(train_o)
+    ),
+    execute_multinom(
+        .train = impute_mean(train_x)
+    ),
+    execute_multinom(
+        .train = impute_median(train_o)
+    ),
+    execute_multinom(
+        .train = impute_median(train_o)
+    ),
+    execute_multinom(
+        .formula = formulas[['c3']],
+        .train   = impute_mean(train_x)
+    )
+))
+```
+
+\newpage
+
+And the results:
+
+```{r}
+cbind(c(
+        'new baseline',
+        'new baseline; plus frequency weights',
+        'new baseline; plus precision weights',
+        'new baseline; but formula v2',
+        'new baseline; but formula v3',
+        'new baseline; omit high-corr',
+        'new baseline; plus center/scale',
+        'new baseline; plus BoxCox',
+        'new baseline; plus YeoJohnson',
+        'new baseline; plus expoTrans',
+        'new baseline; omit most volatile rows',
+        'new baseline; omit least volatile rows',
+        'new baseline; omit most volatile cols',
+        'new baseline; omit least volatile cols',
+        'new baseline; mean-impute outliers',
+        'new baseline; mean-impute outliers and extremes',
+        'new baseline; median-impute outliers',
+        'new baseline; median-impute outliers and extremes',
+        'new baseline; mean-impute outliers and extremes, formula v3'
+    ),
+    metrics
+) |> knitr::kable(col.names = c('Model', 'Accuracy'), caption = 'Multinom via Train') |>
+     kable_styling(bootstrap_options = 'bordered') |> footnote(
+         general = 'new baseline definition:',
+         number  = c(
+             'formula:  `factor(Species) ~ .`',
+             'preProcess: `c("pca", "corr")`',
+             'tuneGrid: `data.frame(decay = .0033)`'
+         )
+     )
+```
+
+\newpage
+
+## Multinom via NNET
+
+Here I look to run `multinom` directly.
+
+```{r  message = FALSE, warning = FALSE}
+f1 <- formulas[['c1']]; f2 <- formulas[['c2']]; f3 <- formulas[['c3']]
+metrics <- vector()
+metrics <- append(metrics, c(
+    accuracy(
+        multinom(f1, train, trace = FALSE, decay = .00015), test
+    ),
+    accuracy(
+        multinom(f1, train, trace = FALSE, decay = .00015, weights = f_weights),
+        test
+    ),
+    accuracy(
+        multinom(f1, train, trace = FALSE, decay = .00015, weights = p_weights),
+        test
+    ),
+    accuracy(
+        multinom(f1, train, trace = FALSE, decay = .00015, weights = 1/p_weights),
+        test
+    ),
+    accuracy(
+        multinom(f1, train, trace = FALSE, decay = .00015, weights = sd_weights),
+        test
+    ),
+    accuracy(
+        multinom(f1, train, trace = FALSE, decay = .00015,
+            subset = sample(1:nrow(train), round(nrow(train)/2))
+        ), test
+    ),
+    accuracy(
+        multinom(f2, train, trace = FALSE, decay = .00015), test
+    ),
+    accuracy(
+        multinom(f3, train, trace = FALSE, decay = .00015), test
+    ),
+    accuracy(
+        multinom(f1, train |> select(-c(all_of(high_corr))),
+            trace = FALSE, decay = .00015),
+        test
+    ),
+    accuracy(
+        multinom(f2, train |> select(-c(all_of(high_corr))),
+            trace = FALSE, decay = .00015),
+        test
+    ),
+    accuracy(
+        multinom(f3, train |> select(-c(all_of(high_corr))),
+            trace = FALSE, decay = .00015),
+        test
+    ),
+    accuracy(
+        multinom(f1, impute_mean(train_o), trace = FALSE, decay = .00015), test
+    ),
+    accuracy(
+        multinom(f1, impute_mean(train_x), trace = FALSE, decay = .00015), test
+    ),
+    accuracy(
+        multinom(f1, impute_median(train_x), trace = FALSE, decay = .00015), test
+    ),
+    accuracy(
+        multinom(f1, impute_median(train_x), trace = FALSE, decay = .00015), test
+    ),
+    accuracy(
+        multinom(f2, impute_mean(train_x), trace = FALSE, decay = .00015), test
+    ),
+    accuracy(
+        multinom(f3, impute_mean(train_x), trace = FALSE, decay = .00015), test
+    )
+))
+```
+
+\newpage
+
+And the results:
+
+```{r}
+cbind(c(
+        'new baseline',
+        'new baseline; plus frequency weights',
+        'new baseline; plus precision weights',
+        'new baseline; plus inversed precision weights',
+        'new baseline; plus row-sd weights',
+        'new baseline; subset half',
+        'new baseline; but formula v2',
+        'new baseline; but formula v3',
+        'new baseline; minus high-corr',
+        'new baseline; minus high-corr; formula v2',
+        'new baseline; minus high-corr; formula v3',
+        'new baseline; mean-impute outliers',
+        'new baseline; mean-impute outliers and extremes',
+        'new baseline; median-impute outliers',
+        'new baseline; median-impute outliers and extremes',
+        'new baseline; mean-impute outliers and extremes; formula v2',
+        'new baseline; mean-impute outliers and extremes; formula v3'
+    ),
+    metrics
+) |> knitr::kable(col.names = c('Model', 'Accuracy'), caption = 'Multinom via NNET') |>
+     kable_styling(bootstrap_options = 'bordered') |> footnote(
+         general = 'new baseline definition:',
+         number  = c(
+             'formula:  `factor(Species) ~ .`',
+             'decay:    `.00015`',
+             'weights:  `vector()`'
+         )
+     )
+```
+
+\newpage
+
+# Conclusions
+
+My main goal was to continue learning. Indeed, I expanded my knowledge
+of `kable`, `corrplot`, and `train`. I stumbled upon `vif` and
+`parsnip::importance_weights`, and dug in to the underpinnings of a
+decision tree. I finally noticed `dplyr` analytic functions like `lag`,
+`lead`, and `ntile`, familiar to me from Oracle/SQL, and put those to
+work. I used `mapply` for the first time, while assembling flexible
+model wrapper functions. Very near the end, I had another thought about
+outliers and found a method for identifying them,
+`rstatix::identify_outliers`, and another for reassigning them,
+`missMethods::impute_mean`. (I had so much hope for this idea, but it
+did not improve over the baseline.) Finally, I decided to knit as HTML
+for the first time; which led me to inline CSS.
+
+In terms of the data, I never got much traction; nothing I tried made a
+very pronounced improvement. But, I did identify a model that achieves
+70+% accuracy, which I think is remarkable against such highly variable
+data; and I was able to improve it from initial baseline of 70.4% to a
+best of 76.9% - about 9% improvement. Alas, noted in the introduction,
+there are no known earlier works to gauge against.
+
+One satisfying conclusion is that I got the same results using the
+`corr` method in `preProcess` and without that, but omitting highly
+correlated columns via `dplyr`.
+
+I will pause here and remain vigilant for a better approach to such
+data; and will undoubtedly revisit and push for 80% accuracy. With
+subsequent projects, I will build upon my execution framework and
+perhaps circle back here with updates. It also seems time to [create my
+own
+library](https://towardsdatascience.com/creating-a-custom-r-package-9a2e303d3332/)
+for some custom functions.
+
+# References
+
+<https://archive.ics.uci.edu/datasets>
+
+<https://cran.r-project.org/web/packages/kableExtra/vignettes/awesome_table_in_html.html>
+
+<https://rstudio.github.io/cheatsheets/html/data-transformation.html>
+
+<https://www.rdocumentation.org/packages/base/versions/3.6.2/topics/sets>
+
+<https://ggplot2.tidyverse.org/reference/scale_discrete.html>
+
+<https://www.modernstatisticswithr.com/regression.html>
+
+<https://www.blopig.com/blog/2019/06/a-brief-introduction-to-ggpairs/>
+
+<https://stackoverflow.com/questions/24135157/arranging-ggally-plots-with-gridextra>
+
+<https://ggobi.github.io/ggally/reference/ggally_cor.html>
+
+<https://www.sthda.com/english/wiki/ggcorrplot-visualization-of-a-correlation-matrix-using-ggplot2>
+
+<https://www.r-bloggers.com/2017/03/plotting-trees-from-random-forest-models-with-ggraph/>
+
+<https://en.wikipedia.org/wiki/Homoscedasticity_and_heteroscedasticity>
+
+<https://www.statology.org/leverage-in-r/>
+
+<https://www.tidyverse.org/blog/2022/05/case-weights/>
+
+<https://notstatschat.rbind.io/2020/08/04/weights-in-statistics/>
+
+<https://search.r-project.org/CRAN/refmans/missMethods/html/impute_mean.html>
+
+<https://github.com/topepo/caret/issues/479>
+
+<https://towardsdatascience.com/creating-a-custom-r-package-9a2e303d3332/>
+
+\newpage
+
+# Appendix - Recreating Autoplot Plots
+
+In [LM Autoplot](#lm_autoplot), I wanted to understand why some points
+are highlighted. That led me to try recreating each autoplot, and I
+moved the off-topic material here.
+
+First, I recreate an `lm` model.
+
+```{r}
+fit  <- lm(Species ~ ., train)
+```
+
+## Highlighting Thresholds
+
+Plots that highlight points typically highlight one to three of the
+largest and/or smallest points. Noted earlier, precisely *which* points
+varies between runs even with a fixed seed.
+
+From one plot title, "Residuals vs Fitted", I might assume that the
+highlighted points have the largest absolute difference between residual
+and fitted values. Indeed? This does list many of the aforementioned;
+but only one that is highlighted in the current plot.
+
+```{r}
+abs(fit$residuals - fit$fitted.values) |>
+    as.data.frame() |>
+    slice_max(order_by = pick(1), n = 5) |>
+    knitr::kable(
+        col.names = c('Genus/Species/Specimen', 'abs(residuals-fitted)'),
+        digits    = 2
+    ) |>
+    kable_styling(bootstrap_options = 'bordered')
+```
+
+\newpage
+
+## Which=1 - "Residuals vs Fitted"
+
+Thresholds are guesswork, but these seems to replicate the original
+quite well.
+
+```{r}
+high <- max(as.integer(fit$residuals))
+low  <- min(as.integer(fit$residuals))
+data.frame(
+    x      = fit$fitted.values,
+    y      = fit$residuals,
+    labels = names(fit$residuals)
+) |> ggplot(aes(x, y)) +
+     geom_point(aes(color = y>=high | y<=low)) +
+     geom_label_repel(
+         aes(label = ifelse(y>=high | y<=low, labels, '')),
+         box.padding   = .25,
+         point.padding = .5,
+         label.size    = .15,
+         segment.color = 'gray'
+     ) +
+     geom_smooth(method = 'loess', formula = 'y ~ x', se = FALSE) +
+     labs(x = 'Fitted', y = 'Residuals', title = 'Residuals vs Fitted') +
+     theme(legend.position = 'none')
+```
+
+\newpage
+
+## Which=2 - "Normal Q-Q"
+
+I acknowledge that this falls short, without labeling the extreme
+values. I have read enough to understand the challenge - that `geom_qq`
+doesn't support `aes(label)` and so it must be rendered `after_stat`. I
+tried - I did get labels to appear, but not the desired row names. TODO,
+perhaps.
+
+```{r warning = FALSE}
+data.frame(x = scale(fit$residuals)) |> 
+    ggplot(aes(sample = x)) +
+    geom_qq() +
+    geom_qq_line(linetype = 2, colour = 'grey') +
+    labs(
+        x     = 'Theoretical Quantiles',
+        y     = 'Standardized Residuals',
+        title = 'Normal Q-Q'
+    )
+```
+
+\newpage
+
+## Which=3 - "Scale-Location"
+
+This seems to replicate the autoplot version well. I don't know if I
+reverse-engineered the y-axis correctly but it looks correct when
+plotted. From the original y-axis label, `sqrt` is clearly used; and
+elsewhere "Standardized" has meant `scale`. To use those two together, I
+inferred `abs` to make all the values positive; then `center = FALSE` to
+keep them all positive - so that `sqrt` rendered no NAs. Once again, I
+don't know how the threshold is calculated. (Come to think of it, I
+wonder what is meant by the title, specifically what is meant by
+"Location".)
+
+```{r}
+thresh <- 1.38  # top three are 1.403895, 1.385063, 1.38496
+data.frame(
+    y      = sqrt(scale(abs(fit$residuals), center=FALSE)),
+    x      = fit$fitted.values,
+    labels = rownames(train)
+) |> ggplot(aes(x, y)) +
+     geom_point() +
+     geom_smooth(method = 'loess', formula = 'y ~ x', se = FALSE) +
+     geom_label_repel(
+         aes(label = ifelse(y>=thresh, labels, '')),
+         box.padding   = .25,
+         point.padding = .5,
+         label.size    = .15,
+         segment.color = 'gray',
+         max.overlaps  = 100
+     ) +
+     labs(x = 'Fitted Values', y = "Standardized Residuals", title = "Scale-Location")
+```
+
+\newpage
+
+## Which=4 - "Cook's Distance"
+
+This is very close, though the threshold formula from
+[RPubs](https://rpubs.com/DragonflyStats/Cooks-Distance) is apparently
+lower than whatever is used via autoplot.
+
+```{r}
+thresh = 4/(nrow(train) - ncol(train) - 1)
+data.frame(
+    y      = cooks.distance(fit),
+    x      = 1:nrow(train),
+    labels = rownames(train)
+) |> ggplot(aes(x, y)) +
+     geom_point() +
+     geom_line() +
+     geom_abline(intercept = thresh, slope = 0, linetype = 2) +
+     geom_label_repel(
+         aes(label = ifelse(y>thresh, labels, '')),
+         box.padding   = .25,
+         point.padding = .5,
+         label.size    = .15,
+         segment.color = 'gray',
+         max.overlaps  = 100
+     ) +
+     labs(x = 'Obs. Number', y = "Cook's Distance", title = "Cook's Distance")
+```
+
+\newpage
+
+## Which=5 - "Residuals vs Leverage"
+
+This is close, though I haven't a clue what the highlighting threshold
+might be - and thus I have no coloring/labeling in place.
+
+```{r}
+data.frame(
+    x = hatvalues(fit),
+    y = scale(fit$residuals)
+) |> ggplot(aes(x, y)) +
+     geom_point() +
+     stat_smooth(method = 'loess', formula = 'y ~ x', se = FALSE, span = .6) +
+     labs(x = 'Leverage', y = 'Normalized Residuals', title = 'Residuals vs Leverage')
+```
+
+\newpage
+
+## Which=6 - "Cook's Distance vs Leverage"
+
+Once again, clueless as to the threshold. And I cannot guess what the
+dashed vertical lines are in the original. Otherwise this is close.
+
+```{r}
+thresh = .045
+data.frame(
+    y      = cooks.distance(fit),
+    x      = hatvalues(fit),
+    labels = rownames(train)
+) |> ggplot(aes(x, y)) +
+     geom_point() +
+     geom_smooth(method = 'loess', formula = 'y ~ x', se = FALSE) +
+     geom_label_repel(
+         aes(label = ifelse(y>thresh, labels, '')),
+         box.padding   = .25,
+         point.padding = .5,
+         label.size    = .15,
+         segment.color = 'gray',
+         max.overlaps  = 100
+     ) +
+     labs(x = 'Leverage', y = "Cook's Distance", title = "Cook's Distance vs Leverage")
+```
