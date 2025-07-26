@@ -6,5 +6,4 @@ I start with two data sets from University of California Irvine:
 
 * [UCI Leaf](https://archive.ics.uci.edu/dataset/288/leaf) - predicting plant species from 15 shape and texture attributes
 
-* [UCI Mushroom](https://archive.ics.uci.edu/dataset/73/mushroom)) - predicting poisonousness based on cap, gill, stem, root, odor, habitat, and other features
-
+* [UCI Mushroom](https://archive.ics.uci.edu/dataset/73/mushroom) - predicting poisonousness based on cap, gill, stem, root, odor, habitat, and other features

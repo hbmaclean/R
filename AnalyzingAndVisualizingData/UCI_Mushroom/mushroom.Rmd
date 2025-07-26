@@ -2,7 +2,7 @@
 title: 'UCI Mushrooom Analysis'
 author: hbmaclean
 date: "`r Sys.Date()`"
-editor_options: 
+editor_options:
   markdown:
     toc: true
     wrap: 72
@@ -22,7 +22,7 @@ packages <- c(
     'kableExtra', 'grid', 'gridExtra', 'factoextra', 'GGally', 'ranger',
     'varhandle', 'devtools', 'randomForest', 'MASS'
 )
-for (package in packages) { 
+for (package in packages) {
     if (!require(package, character.only = TRUE)) {
         install.packages(package, repos = repo)
         library(package, character.only = TRUE)
@@ -78,7 +78,7 @@ fetch_data <- function(verbose=FALSE) {
     options(timeout = 120)
     tmp   <- tempfile()
     zip   <- "https://archive.ics.uci.edu/static/public/73/mushroom.zip"
-    
+
     download.file(zip, tmp, quiet = !verbose)
     data <- as.data.frame(
         str_split(
@@ -89,7 +89,7 @@ fetch_data <- function(verbose=FALSE) {
             simplify=TRUE
         )
     )
-    
+
     colnames(data) <- c(
         "poisonous", "cap_shape", "cap_surface", "cap_color",
         "bruises", "odor", "gill_attachment", "gill_spacing",
@@ -142,22 +142,22 @@ convert that to a `hash` lookup table:
 # Map letters to their definitions, provided on website
 make_legible <- function(data) {
     library(hash)
-  
+
     # colors and surfaces are used several times
     colors <- hash(
         keys   = c('k', 'n', 'b', 'h', 'g', 'r', 'o', 'p', 'u', 'e', 'w', 'y', 'c'),
         values = c('black', 'brown', 'buff', 'chocolate', 'gray', 'green', 'orange',
                    'pink', 'purple', 'red', 'white', 'yellow', 'cinnamon')
     )
-    
+
     surfaces <- hash(
         keys   = c('f', 'y', 'k', 's', 'g'),
         values = c('fibrous', 'scaly', 'silky', 'smooth', 'grooves')
     )
-    
+
     values_map  <- hash(
         keys    = names(data),
-        values = c( 
+        values = c(
             hash(
                keys   = c('p', 'e'),
                values = c(1, 0)

@@ -13,42 +13,39 @@
 #
 #:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 
-repo <- "http://cran.us.r-project.org"
-if(!require(caret))      install.packages("caret",      repos = repo)
-if(!require(dplyr))      install.packages("dplyr",      repos = repo)
-if(!require(stringr))    install.packages("stringr",    repos = repo)
-if(!require(readr))      install.packages("readr",      repos = repo)
-if(!require(ranger))     install.packages("ranger",     repos = repo)
-if(!require(varhandle))  install.packages("varhandle",  repos = repo)
-library(caret)
-library(dplyr)
-library(stringr)
-library(ranger)
-library(varhandle)
+packages <- c(
+    'stringr', 'readr', 'dplyr', 'caret', 'ranger'
+)
+for (package in packages) {
+    if (!require(package, character.only = TRUE)) {
+        install.packages(package, repos = 'http://cran.us.r-project.org')
+        library(package, character.only = TRUE)
+    }
+}
 
 # Download mushroom.zip from UCI.edu and render it as a data.frame
-fetch_data <- function(verbose=FALSE) {
+fetch_data <- function(verbose = FALSE) {
     options(timeout = 120)
     tmp   <- tempfile()
-    zip   <- "https://archive.ics.uci.edu/static/public/73/mushroom.zip"
-    
+    zip   <- 'https://archive.ics.uci.edu/static/public/73/mushroom.zip'
+
     download.file(zip, tmp, quiet = !verbose)
     data <- as.data.frame(
         str_split(
             read_lines(
-                unz(tmp, "agaricus-lepiota.data")
+                unz(tmp, 'agaricus-lepiota.data')
             ),
-            ",",
-            simplify=TRUE
+            ',',
+            simplify = TRUE
         )
     )
-    
+
     colnames(data) <- c(
-        "poisonous", "cap_shape", "cap_surface", "cap_color", "bruises", "odor",
-        "gill_attachment", "gill_spacing", "gill_size", "gill_color",
-        "stalk_shape", "stalk_root", "stalk_surface_above_ring", "stalk_surface_below_ring",
-        "stalk_color_above_ring", "stalk_color_below_ring", "veil_type", "veil_color",
-        "ring_number", "ring_type", "spore_print_color", "population", "habitat"
+        'poisonous', 'cap_shape', 'cap_surface', 'cap_color', 'bruises', 'odor',
+        'gill_attachment', 'gill_spacing', 'gill_size', 'gill_color',
+        'stalk_shape', 'stalk_root', 'stalk_surface_above_ring', 'stalk_surface_below_ring',
+        'stalk_color_above_ring', 'stalk_color_below_ring', 'veil_type', 'veil_color',
+        'ring_number', 'ring_type', 'spore_print_color', 'population', 'habitat'
     )
     return(data)
 }

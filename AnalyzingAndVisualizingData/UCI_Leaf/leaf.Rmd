@@ -55,7 +55,7 @@ packages <- c(
      'matrixStats', 'boot.pval', 'corrplot', 'kableExtra', 'varhandle', 'devtools',
     'ranger', 'randomForest', 'fastICA', 'car', 'parsnip', 'nnet', 'missMethods'
 )
-for (package in packages) { 
+for (package in packages) {
     if (!require(package, character.only = TRUE)) {
         install.packages(package, repos = repo)
         library(package, character.only = TRUE)
@@ -96,7 +96,7 @@ fetch_data <- function(verbose=FALSE) {
     options(timeout = 120)
     tmp   <- tempfile()
     zip   <- "https://archive.ics.uci.edu/static/public/288/leaf.zip"
-    
+
     download.file(zip, tmp, quiet = !verbose)
     data <- as.data.frame(
         str_split(
@@ -107,7 +107,7 @@ fetch_data <- function(verbose=FALSE) {
             simplify=TRUE
         )
     ) |> mutate(across(everything(), ~ as.double(.x)))
-    
+
     colnames(data) <- c(
         'Species', 'SpecimenNumber', 'Eccentricity', 'AspectRatio',
         'Elongation', 'Solidity', 'StochasticConvexity',
@@ -322,7 +322,7 @@ leaf_correlations <- function(df) {
         digits      = 1,
         show.diag   = FALSE,    # omits self-correlation diagonal
         p.mat       = p.mat,    # p-values
-        sig.level   = 0.001,    # p-value threshold  
+        sig.level   = 0.001,    # p-value threshold
         insig       = 'blank',  # omits correlations with p-values below threshold
         show.legend = FALSE,
         title       = 'Leaf Feature Correlations'
@@ -894,7 +894,7 @@ grid.arrange(
     top = textGrob(
         "Ranger Regression",
         gp = gpar(fontsize = 12, font = 3)
-    ) 
+    )
 )
 ```
 
@@ -1117,7 +1117,7 @@ lesser extend, 8 (*Nerium oleander*).
 ```{r}
 x  <- train$Species
 y  <- rowSds(train[,2:15] |> as.matrix())   # visibly same with rowSums
-ggplot() + 
+ggplot() +
     geom_boxplot(aes(x, y, group = x)) +
     scale_x_continuous(
         breaks = c(1:15,22:36),
@@ -1981,7 +1981,7 @@ tried - I did get labels to appear, but not the desired row names. TODO,
 perhaps.
 
 ```{r warning = FALSE}
-data.frame(x = scale(fit$residuals)) |> 
+data.frame(x = scale(fit$residuals)) |>
     ggplot(aes(sample = x)) +
     geom_qq() +
     geom_qq_line(linetype = 2, colour = 'grey') +

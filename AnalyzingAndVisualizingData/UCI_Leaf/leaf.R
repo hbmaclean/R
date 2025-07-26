@@ -1,15 +1,23 @@
-#::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::#
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
 #
-# This is the minimal required code for the what was generally the
-# best model for this UCI Leaf database, abstracted from the fuller
-# leaf.Rmd.
+#    NAME:         leaf.R
 #
-#::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::#
+#    SYNOPSIS:     Rscript leaf.R
+#
+#    DESCRIPTION:  Downloads leaf data from UCI.org.
+#                  Wrangles the data into a data.frame.
+#                  Fits a classification model to it with nnet::multinom.
+#                  Calculates and reports Accuracy.
+#
+#    NOTE:         This intentionally reduced to JUST the final solution.
+#
+#:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+
 
 packages <- c(
     'stringr', 'readr', 'dplyr', 'caret', 'utils', 'stats', 'nnet'
 )
-for (package in packages) { 
+for (package in packages) {
     if (!require(package, character.only = TRUE)) {
         install.packages(package, repos = "http://cran.us.r-project.org")
         library(package, character.only = TRUE)
@@ -20,7 +28,7 @@ fetch_data <- function(verbose=FALSE) {
     options(timeout = 120)
     tmp   <- tempfile()
     zip   <- 'https://archive.ics.uci.edu/static/public/288/leaf.zip'
-    
+
     download.file(zip, tmp, quiet = !verbose)
     data <- as.data.frame(
         str_split(
@@ -31,7 +39,7 @@ fetch_data <- function(verbose=FALSE) {
             simplify = TRUE
         )
     ) |> mutate(across(everything(), ~ as.double(.x)))
-    
+
     colnames(data) <- c(
         'Species', 'SpecimenNumber', 'Eccentricity', 'AspectRatio',
         'Elongation', 'Solidity', 'StochasticConvexity',
