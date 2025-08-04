@@ -1,0 +1,1537 @@
+---
+title: "Kaggle Plant Disease Classification"
+author: "hbmaclean"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    df_print: paged
+    code_folding: show
+editor_options:
+  markdown:
+    toc: true
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{css, echo = FALSE}
+h1 {
+    margin-top: 2em;
+    border-bottom: 2px solid black;
+    padding-bottom: 5px;
+}
+h2 {
+    margin-top: 1em;
+}
+h3 {
+    margin-top: 1em;
+}
+p {
+    margin-top: 2px;
+}
+table {
+    margin-top: 1em;
+    margin-bottom: 1em;
+    background: snow;
+}
+th {
+    background: snow;
+}
+img {
+    border: 1px solid black;
+    margin-top: 4px;
+    margin-bottom: 4px;
+    width: 100%;
+}
+```
+
+# Introduction {#introduction}
+
+This is just another side project to keep me learning. I picked this one
+in particular to try a source other than
+[UCI](https://archive.ics.uci.edu/datasets) and because it had some
+notebooks listed that I can gauge against. I scanned about five of the
+notebooks - all were python-based, looked very similar, and had accuracy
+around 75-85%.
+
+Below is a description of the data from
+[Kaggle](https://www.kaggle.com/datasets/turakut/plant-disease-classification).
+
+> Plant diseases cause significant agricultural losses worldwide. Early
+> prediction of disease outbreaks can help farmers take preventive
+> measures. This synthetic dataset simulates environmental conditions
+> that might lead to fungal infections in plants.
+>
+> The dataset contains 10,000 samples representing environmental
+> measurements from different farm locations with the following
+> features: 
+>
+> -   **temperature**: Measured in degrees Celsius 
+>
+> -   **humidity**: Measured as percentage 
+>
+> -   **rainfall**: Measured in millimeters 
+>
+> -   **soil_pH**: Acidity/alkalinity measurement 
+>
+> -   **disease_present**: Binary label (0 = healthy, 1 = diseased)
+
+# Importing Packages
+
+```{r warning = FALSE, message = FALSE}
+repo <- "http://cran.us.r-project.org"
+packages <- c(
+    'curl', 'stringr', 'dplyr', 'tidyr', 'data.table', 'caret', 'tibble',
+    'kableExtra', 'ggcorrplot', 'gridExtra', 'GGally', 'stats', 'rstatix',
+    'ranger', 'tuneRanger', 'mlr', 'randomForest', 'missMethods', 'nnet',
+    'naivebayes', 'matrixStats', 'earth', 'mda', 'hda', 'bnclassify', 'rocc',
+    'VGAM', 'HiDimDA', 'DT', 'devtools'
+)
+for (package in packages) {
+    if (!require(package, character.only = TRUE)) {
+        install.packages(package, repos = repo)
+        library(package, character.only = TRUE)
+    }
+}
+
+install_github('munoztd0/reprtree')
+eval(substitute(library(pkg), list(pkg='reprtree')))
+library(reprtree)
+
+set.seed(34)
+```
+
+# Fetching the Data
+
+Rather than setting up API keys and assuming the reader will do the
+same, I fetch instead with `curl`. Straightforward, other than that the
+CSV has column names in the first row.
+
+```{r}
+fetch_data <- function() {
+    options(timeout = 120)
+    url <- paste0(
+        'https://www.kaggle.com/api/v1/datasets/download/',
+        'turakut/plant-disease-classification'
+    )
+    tmp <- tempfile()
+    curl_download(url, tmp)
+    data <- as.data.frame(
+        read.csv(
+            unz(tmp, 'plant_disease_dataset.csv'),
+            header = FALSE,   # first row has column names
+            skip = 1          # skip them
+        )
+    )
+    colnames(data) <- c(
+        'temperature', 'humidity', 'rainfall', 'soil_ph', 'disease_present'
+    )
+    return(data)
+}
+```
+
+## Data Sample
+
+```{r}
+plant_df <- fetch_data()
+head(plant_df) |> kable() |> kable_styling()
+```
+
+# Partitioning
+
+```{r}
+index    <- createDataPartition(y = plant_df$disease_present, times = 1, p = 0.5, list = FALSE)
+train_df <- plant_df[index,]
+test_df  <- plant_df[-index,]
+```
+
+## Class Distribution {#class_distribution}
+
+Good for the plants - only 24% are diseased.
+
+```{r}
+prop.table(table(plant_df$disease_present)) |>
+    kable(col.names = c('disease_present', 'proportion')) |>
+    kable_styling(full_width = FALSE, position = 'left')
+```
+
+Here I look at histograms of the predictors faceted by
+`disease_present`. To my eye, each predictor follows one very similar
+distribution, whether healthy or diseased. The y-axes indicate the class
+imbalance.
+
+```{r warning = FALSE, fig.width=10, fig.height=10}
+common <- c(
+     geom_histogram(binwidth = 5),
+     facet_wrap(
+         disease_present ~ .,
+         nrow     = 2,
+         scales   = 'free',
+         labeller = as_labeller(c('0' = 'Healthy', '1' = 'Diseased'))
+     )
+)
+
+p1 <- plant_df |> ggplot(aes(humidity))    + common
+p2 <- plant_df |> ggplot(aes(rainfall))    + common
+p3 <- plant_df |> ggplot(aes(temperature)) + common
+p4 <- plant_df |> ggplot(aes(soil_ph))     + common
+grid.arrange(
+    p1, p2, p3, p4, ncol = 2
+)
+```
+
+## Missing Values, Outliers, Extreme Values {#missing_outlying_extreme}
+
+There are no missing values nor extreme values, but evidently some
+outliers to potentially impute.
+
+```{r}
+c(
+    'missing'  = any(is.na(plant_df)),
+    'outlying' = any(rstatix::is_outlier(plant_df |> as.matrix())),
+    'extreme'  = any(rstatix::is_extreme(plant_df |> as.matrix()))
+) |> kable(col.names = c('Values', 'Occurrence')) |>
+     kable_styling(full_width = FALSE, position = 'left')
+```
+
+Since there are outliers, I'll tuck aside a copy of `train_df` with
+outliers set to `NA` - to be imputed later.
+
+```{r}
+train_o      <- train_df |> as.matrix()
+outliers     <- rstatix::is_outlier(train_o)
+idx          <- which(outliers[,2:ncol(train_o)])
+train_o[idx] <- NA
+train_o      <- train_o |> as.data.frame()
+```
+
+# Row- and Column SDs
+
+Here I use standard deviation as a proxy for volatility, and look for an
+observable difference between diseased and healthy cases.
+
+```{r}
+x  <- plant_df$disease_present
+y  <- matrixStats::rowSds(plant_df[,1:4] |> as.matrix())
+ggplot() +
+    geom_boxplot(aes(x, y, group = x)) +
+    scale_x_continuous(
+        breaks = c(0,1),
+        labels = as_labeller(c('0' = 'Healthy', '1' = 'Diseased'))
+    ) +
+    labs(x = '', y = 'rowSds')
+```
+
+Row-wise, diseased observations have a narrower IQR and considerably
+higher mean.
+
+Now I take a similar look at columns' standard deviations and means.
+
+```{r warning = FALSE}
+plant_df |>
+    group_by(disease_present) |>
+    dplyr::summarize(across(everything(), list(mean = mean, sd = sd))) |>
+    kable(
+        digits = 3,
+        col.names = c('diseased', rep(c('mean', 'sd'), 4))
+    ) |>
+    kable_styling(
+        bootstrap_options = c('bordered', 'striped'),
+        full_width = FALSE,
+        position = 'left'
+    ) |>
+    add_header_above(c(' ', 'temp' = 2, 'humidity' = 2, 'rain' = 2, 'soil/ph' = 2))
+```
+
+Column-wise, the two classes are fairly similar in terms of
+`temperature` and `soil_ph`; but diseased observations have considerably
+higher mean for `humidity` and `rainfall`, as well as a considerably
+higher deviation for `rainfall`. Perhaps these facts can be incorporated
+as case weights or formula interactions.
+
+# Dimension Reduction
+
+I have low expectations here since there are only four predictors.
+
+## Near-Zero Variability
+
+To the contrary, almost all data points are unique.
+
+```{r}
+plant_df |> select(-c(disease_present)) |>
+    summarise_all(n_distinct) |>
+    pivot_longer(everything(), names_to = 'Column', values_to = 'N_Distinct') |>
+    mutate(Variability = N_Distinct/nrow(plant_df) * 100) |>
+    arrange(desc(N_Distinct)) |>
+    knitr::kable(
+        digits  = 2,
+        align   = 'l',
+        caption = 'Plant Disease Feature Variability'
+    ) |>
+    kable_styling(
+        bootstrap_options = c('bordered', 'striped'),
+        full_width = FALSE,
+        position = 'left'
+    )
+```
+
+## Principal Component Analysis
+
+Nothing worthwhile here either - all features contribute rather evenly
+to the overall variance.
+
+```{r}
+pca <- prcomp(plant_df, scale = TRUE)
+PCs <- which(cumsum(pca$sdev^2)/sum(pca$sdev^2) < 0.90)
+s   <- summary(pca)
+p1  <- barchart(
+    pca$rotation[,1:length(PCs)],
+    auto.key = TRUE,
+    main = sprintf(
+        '90%% variance PCs %s',
+        paste(PCs, collapse = ', ')
+    )
+)
+p2 <- s$importance[,1:4] |>
+    as.data.frame() |>
+    rownames_to_column() |>
+    filter(rowname == 'Proportion of Variance') |>
+    pivot_longer(-rowname) |>
+    dplyr::select(-rowname) |>
+    mutate(name = reorder(name, desc(value))) |>
+    ggplot(aes(name, value)) +
+    geom_col() +
+    labs(x = '', y = 'Variance Explained', title = 'Scree Plot') +
+    theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1)) +
+    scale_y_continuous(labels = scales::percent)
+
+grid.arrange(p1, p2, nrow = 2)
+```
+
+## Correlation
+
+All correlations are weak, features appear to be independent of one
+another.
+
+```{r}
+# matrix of correlation p-values (conflict with rstatix w/o qualification)
+p.mat <- ggcorrplot::cor_pmat(plant_df)
+
+ggcorrplot(
+    cor(plant_df),
+    hc.order    = TRUE,     # reorder layout with hierarchical clustering
+    hc.method   = 'median', # see ?hclust for other methods
+    lab         = TRUE,     # adds correlation coefficients
+    lab_size    = 3,
+    digits      = 1,
+    show.diag   = FALSE,    # omits self-correlation diagonal
+    p.mat       = p.mat,    # p-values
+    sig.level   = 0.001,    # p-value threshold
+    insig       = 'blank',  # omits correlations with p-values below threshold
+    show.legend = FALSE,
+    title       = 'Plant Feature Correlations'
+)
+```
+
+But, `humidity`, `rainfall`, and `soil_ph` correlations with the outcome
+have very low p-values, indicated by `***`.
+
+```{r message = FALSE}
+ggpairs(plant_df)
+```
+
+## Analysis of Variance (AOV)
+
+[AOV](https://www.rdocumentation.org/packages/stats/versions/3.6.2/topics/aov)
+does caution that it works best with balanced designs - and I assume
+this is NOT, given the class distribution of about 75%/25%. Otherwise, I
+would conclude that `rainfall` and `humidity` are most influential.
+
+```{r}
+unclass(summary(stats::aov(disease_present ~ ., data = plant_df))) |>
+    as.data.frame() |>
+    rownames_to_column(var = 'Column') |>
+    filter(!is.na(F.value)) |>
+    mutate(Column = reorder(Column, desc(F.value))) |>
+    ggplot(aes(Mean.Sq, F.value, color = Column)) +
+    geom_point(cex = 4) +
+    scale_x_log10()
+```
+
+Concluding this topic, there is no apparent room for reduction. `corr`,
+`pca`, and `nzv` will surely not be worthwhile `preProcess` options.
+
+# Initial Model Framework
+
+Here I create functions for making predictions, calculating accuracy,
+running individual models, tracking results, and easily running them all
+together. The goal is to run numerous models and then narrow down to the
+most accurate one or few.
+
+## Predictions and Accuracy
+
+Below are functions to make predictions and calculate accuracy, using
+the
+[ellipsis](https://cran.r-project.org/web/packages/ellipsis/ellipsis.pdf)
+argument to allow model nuances to be passed in.
+
+```{r}
+predictions <- function(model, test_df, ...) {
+    pred <- predict(model, test_df, ...)
+    if (is.atomic(pred)) {
+        predictions <- pred
+    }
+    else {
+        predictions <- pred$predictions
+    }
+    predictions
+}
+
+accuracy <- function(model, test_df, verbose = FALSE, ...) {
+    acc <- NA
+    tryCatch({
+        pred <- predictions(model, test_df, ...)
+        cm   <- confusionMatrix(pred, factor(test_df$disease_present))
+        acc  <- round(100*cm$overall[['Accuracy']], 3)
+    },
+    error = function(e) {
+        if (verbose) {
+            sprintf('model %s, error %s', class(model), e)
+        }
+    },
+    finally = {
+        return(acc)
+    })
+}
+```
+
+## Formula and Models
+
+And here, a basic formula; and a function for each model.
+
+```{r}
+fc <- as.formula(factor(disease_present) ~ .)
+
+ranger__c <- function(train_df, test_df, formula = fc) {
+    fit <- ranger(formula, train_df)
+    accuracy(fit, test_df)
+}
+
+rf__c <- function(train_df, test_df, formula = fc) {
+    fit <- randomForest(formula, train_df, ntree = 20)
+    accuracy(fit, test_df)
+}
+
+multinom__c <- function(train_df, test_df, formula = fc) {
+    fit <- multinom(formula, train_df, trace = FALSE, decay = .00015)
+    accuracy(fit, test_df)
+}
+
+naive_bayes__c <- function(train_df, test_df, formula = fc) {
+    fit <- naive_bayes(formula, train_df, usekernel = TRUE)
+    accuracy(fit, test_df)
+}
+
+avNNet__c <- function(train_df, test_df, formula = fc) {
+    fit <- avNNet(formula, train_df, size = 5, trace = FALSE)
+    accuracy(fit, test_df, type = 'class')
+}
+
+knn3__c <- function(train_df, test_df, formula = fc, ...) {
+    fit <- knn3(formula, train_df, ...)
+    accuracy(fit, test_df, type = 'class')
+}
+```
+
+## Model Runner
+
+Finally, a function to actually run the models and accumulate metrics.
+
+```{r}
+run_models <- function(.train = train_df, .test = test_df, ...) {
+    results <- vector()
+    results <- append(results, c(
+        ranger__c(.train, .test, ...),
+        rf__c(.train, .test, ...),
+        multinom__c(.train, .test, ...),
+        naive_bayes__c(.train, .test, ...),
+        avNNet__c(.train, .test, ...),
+        knn3__c(.train, .test, k = 13)
+    ))
+    names(results) <- c('ranger', 'rf', 'multinom', 'naive_bayes', 'avNNet', 'knn3')
+    return(results)
+}
+```
+
+## Metrics Summary
+
+Below, a function to display the metrics. At the moment, the expectation
+is that the named vector from `run_models` will be bound with an initial
+column of meaningful labels.
+
+```{r}
+display_summary <- function(.data) {
+    .data |>
+        dplyr::rename(` ` = c(1)) |>
+        datatable(
+            rownames = FALSE,
+            width    = '75%',
+            options  = list(
+                dom        = 't',
+                pageLength = nrow(.data)
+            )
+        )
+}
+```
+
+## Initial Runs - Baseline, Imputing, Scaling, Centering
+
+With the framework defined, I run the models in various scenarios -
+imputing outliers, scaling, and centering.
+
+```{r warning = FALSE, message = FALSE}
+model_summary <- bind_rows(
+    run_models(),
+    run_models(.train = impute_mean(train_o)),
+    run_models(.train = impute_median(train_o)),
+    run_models(
+        .train = train_df |>
+            mutate(across(-c(disease_present), ~ scale(.x, center=FALSE, scale=TRUE))),
+        .test  = test_df  |>
+            mutate(across(-c(disease_present), ~ scale(.x, center=FALSE, scale=TRUE)))
+    ),
+    run_models(
+        .train = train_df |>
+            mutate(across(-c(disease_present), ~ scale(.x, center=TRUE, scale=FALSE))),
+        .test  = test_df  |>
+            mutate(across(-c(disease_present), ~ scale(.x, center=TRUE, scale=FALSE)))
+    ),
+    run_models(
+        .train = train_df |>
+            mutate(across(-c(disease_present), ~ scale(.x, center=TRUE, scale=TRUE))),
+        .test  = test_df  |>
+            mutate(across(-c(disease_present), ~ scale(.x, center=TRUE, scale=TRUE)))
+    )
+)
+model_summary <- bind_cols(
+    c(
+        'baseline', 'mean-impute outliers', 'median-impute outliers',
+        'scaled', 'centered', 'centered & scaled'
+    ),
+    model_summary
+)
+
+display_summary(model_summary)
+```
+
+# Second Model Framework - train()
+
+From above, `ranger` and `randomForest` look best - always above 80%.
+Here, I look more closely at those two using `train`, hoping to tune
+them better with `preProcess`, `tuneGrid`, and `trainControl`.
+
+## Models and Tuning
+
+Many models seem to be available only via `train`; others are available
+directly but do not conform to the typical fit/predict/confusionMatrix
+pattern. Since I am building a framework to run `ranger` and
+`randomForest` via `train`, I also chose additional classification
+models that I have used before or sampled arbitrarily now from this
+[caret list](https://rdrr.io/cran/caret/man/models.html).
+
+First, I define a list of `tuneGrid` objects for the models, each `NULL`
+by default; with the names serving as a proxy for the list of models.
+
+```{r}
+tuning  <- list(
+    'ranger'        = NULL,
+    'rf'            = NULL,
+    'Rborist'       = NULL,
+    'svmRadial'     = NULL,
+    'mlp'           = NULL,
+    'xgbTree'       = NULL,
+    'gamLoess'      = NULL,
+    'rocc'          = NULL,
+   #'hda'           = NULL,   <---- omitted, hopelessly verbose
+    'glmnet'        = NULL,
+    'treebag'       = NULL,
+    'vglmContRatio' = NULL,
+    'RFlda'         = NULL,
+    'lssvmRadial'   = NULL
+)
+```
+
+This is admittedly a shotgun approach, but it exposes me to more models.
+I actually chose more models, but skipped any that failed for any
+reason. Some require packages that are not in the usual location; and
+the following failed with, "all the Accuracy metric values are missing":
+
+-   gbm, fda, awnb, bagFDAGCV, ada, rpartCost, dwdRadial, randomGLM,
+    binda, lssvmLinear
+
+I have encountered the error before and I suspect that either it could
+be resolved with appropriate tuning, or the model is simply not designed
+for the data. I may try to solve that some other day.
+
+## Running the Models via Train
+
+Here I write a function to generically execute a model via `train` and
+capture its accuracy. Arguments allow for alternate data sets, formula,
+model list, `trControl` and lists of `tuneGrid` objects; and the
+[ellipsis](https://cran.r-project.org/web/packages/ellipsis/ellipsis.pdf)
+argument implicitly allows for `preProcess` and whatever else might be
+applicable.
+
+```{r warning = FALSE, message = FALSE}
+execute_models <- function(
+    .train        = train_df,
+    .test         = test_df,
+    .formula      = fc,
+    .models       = names(tuning),
+    .tuning       = tuning[c(.models)],
+    .trControl    = trainControl(method = 'repeatedcv', number = 2, p = .5),
+    .preProcess   = c('center', 'scale'),
+    bestTune      = FALSE,
+    verbose       = FALSE,
+    ...
+) {
+    results <- vector()
+    results <- mapply(
+        function(model, tune, ...) {
+            acc <- NA
+            tryCatch({
+                fit <- caret::train(
+                      .formula,
+                      method        = model,
+                      data          = .train,
+                      trControl     = .trControl,
+                      tuneGrid      = tune,
+                      preProcess    = .preProcess,
+                      trace         = FALSE,
+                      verbosity     = 0,
+                      verbose       = FALSE,
+                      na.action     = na.pass,
+                      ...
+                )
+                acc <- accuracy(fit, .test)
+            },
+            error = function(e) {
+                if (verbose) {
+                    print(c(Model = model, error = e))
+                }
+            },
+            finally = {
+                results <- append(results, acc)
+                if (bestTune && !is.null(acc)) {
+                    print(c(Model = model, bestTune = fit$bestTune))
+                }
+            })
+        },
+        .models,
+        .tuning,
+        ...
+    )
+    if (is.vector(results) & length(names(results))>1) {
+        return(bind_rows(results))
+    }
+    else {
+        return(results)
+    }
+}
+```
+
+## First Runs - Baseline
+
+And now I run what I'll consider a baseline and look for the top few.
+
+```{r warning = FALSE, message = FALSE}
+baselines <- execute_models()
+baselines |>
+    pivot_longer(everything()) |>
+    arrange(desc(value)) |>
+    kable(col.names = c('Model', 'Accuracy')) |>
+    kable_styling(full_width = FALSE, position = 'left')
+```
+
+## Tuning the Top Five Models
+
+Next I'll focus on the top five models, which appropriately are all
+forestry-related in name. First I will dig into each model's `tundGrid`.
+
+It proved to be a little tricky passing in the `tuneGrid` for a single
+model. Since I've implemented `.tuning` as an argument to `mapply`, a
+list is expected. Passing in a single `tuneGrid` gives an error,
+"incorrect number of dimensions".
+
+Below is one example; and for `xbgTree` I had to be careful to NOT
+create too large a grid!
+
+```{r eval = FALSE}
+execute_models(
+    .models = c('xgbTree'),
+    .tuning = list(expand.grid(
+        nrounds          = 10,
+        max_depth        = c(2:5),
+        eta              = c(.5,.7,.9),
+        gamma            = c(3:6),
+        colsample_bytree = c(.7,.8,.9),
+        min_child_weight = c(5,10,15),
+        subsample        = 1
+    )),
+    bestTune = TRUE
+)
+```
+
+Below are the settings I settled on. Fiddling them further did not
+change accuracy much in either direction.
+
+```{r warning = FALSE}
+tuning <- list(
+    xgbTree    = expand.grid(
+        nrounds          = 50,
+        max_depth        = 3,
+        eta              = .1,
+        gamma            = .9,
+        colsample_bytree = seq(.8,1,.1),
+        min_child_weight = c(1:3),
+        subsample        = c(1:2)
+    ),
+    ranger     = data.frame(
+        mtry          = 2,
+        splitrule     = 'hellinger',
+        min.node.size = 50
+    ), 
+    rf      = data.frame(mtry = 2),
+    Rborist = data.frame(predFixed = 2, minNode   = 2),
+    treebag = NULL
+)
+tuned <- execute_models()
+tuned |>
+    pivot_longer(everything()) |>
+    arrange(desc(value)) |>
+    kable(col.names = c('Model', 'Accuracy')) |>
+    kable_styling(full_width = FALSE, position = 'left')
+```
+
+## Pre-Processing the Top Five Models
+
+With the top five models tuned, I look into other `preProcess` methods.
+
+Note, "all the Accuracy metric values are missing" occurs again with the
+following methods:
+
+-   'conditionalX'
+-   'knnImpute'
+-   'BoxCox', but only when adjusting the associated 'fudge' parameter,
+    and then only for 'ranger' and 'rf'
+
+```{r warning = FALSE, message = FALSE}
+preprocessed <- bind_rows(
+    execute_models(.preProcess = c('BoxCox')),
+    execute_models(.preProcess = c('YeoJohnson')),
+    execute_models(.preProcess = c('expoTrans')),
+    execute_models(.preProcess = c('center')),
+    execute_models(.preProcess = c('scale')),
+    execute_models(.preProcess = c('center', 'scale')),
+    execute_models(.preProcess = c('bagImpute'), .train = train_o),
+    execute_models(.preProcess = c('medianImpute'), .train = train_o)
+)
+```
+
+And the results:
+
+```{r warning = FALSE, message = FALSE}
+model_summary <- bind_cols(
+    c(
+        'baseline', 'tuned',
+        'BoxCox', 'YeoJohnson', 'expoTrans', 'center', 'scale',
+        'center+scale', 'bagImpute', 'medianImpute'
+    ),
+    bind_rows(baselines[c(names(tuned))], tuned, preprocessed),
+)
+
+display_summary(model_summary)
+```
+
+Conclusions from this:
+
+-   as seen earlier projects, imputing outliers has a measurably
+    *harmful* effect
+-   otherwise, various `preProcess` options made *minor* improvements
+    over the 'tuned' models
+-   `treebag` is lagging - its best accuracy is less than the others'
+    least, other than imputing
+
+## trainControl Methods for the Top Five Models
+
+Now I try various `trainControl` methods. For simplicity, I rely mostly
+on underlying default values; and specify only `method`, and constant
+`number = 2` rather than default 10 or 25, for performance reasons.
+
+```{r warning = FALSE, message = FALSE}
+# Note, there is also LOOCV (leave-one-out CV) but it is computationally *intense*
+trcontrolled <- bind_rows(
+    execute_models(.trControl = trainControl(number = 2, method = 'boot')),
+    execute_models(.trControl = trainControl(number = 2, method = 'boot632')),
+    execute_models(.trControl = trainControl(number = 2, method = 'boot_all')),
+    execute_models(.trControl = trainControl(number = 2, method = 'optimism_boot')),
+    execute_models(.trControl = trainControl(method = 'adaptive_boot')),
+    execute_models(.trControl = trainControl(number = 2, method = 'cv')),
+    execute_models(.trControl = trainControl(number = 2, method = 'repeatedcv')),
+    execute_models(.trControl = trainControl(method = 'adaptive_cv')),
+    execute_models(.trControl = trainControl(number = 2, method = 'LGOCV')),
+    execute_models(.trControl = trainControl(method = 'adaptive_LGOCV'))
+)
+trcontrolled <- bind_cols(
+    c(
+        'boot', 'boot632', 'boot_all', 'optimism_boot', 'adaptive_boot',
+        'cv', 'repeatedcv', 'adaptive_cv', 'LGOCV', 'adaptive_LGOCV'
+    ),
+    trcontrolled
+)
+
+model_summary <- bind_rows(model_summary, trcontrolled)
+display_summary(model_summary)
+```
+
+## Formula Modifications
+
+I understand the *syntax* of what I'm doing here, but I cannot envision
+the underlying mechanics. I have no expectations, just another
+experiment.
+
+```{r warning = FALSE, message = FALSE}
+formulamods <- bind_rows(
+    execute_models(
+        .formula = as.formula(factor(disease_present) ~ humidity*rainfall + .)
+    ),
+    execute_models(
+        .formula = as.formula(
+            factor(disease_present) ~ humidity:rainfall + .
+        )
+    ),
+    execute_models(
+        .formula = as.formula(
+            factor(disease_present) ~ (humidity+rainfall+temperature)^3 + .
+        )
+    ),
+    execute_models(
+        .formula = as.formula(
+            factor(disease_present) ~ (humidity+rainfall+temperature)^3 + I(soil_ph^2)
+        )
+    )
+)
+
+formulamods <- bind_cols(
+    c(
+        'humidity*rain', 'humidity:rain', '(humidity+rain+temp)^3',
+        '(humidity+rain+temp)^3 + ph^2'
+    ),
+    formulamods
+)
+
+model_summary <- bind_rows(model_summary, formulamods)
+display_summary(model_summary)
+```
+
+That had a negative effect, though not quite as bad as imputing.
+
+Note, I tried similar formulas when running the models directly (without
+`train`) but continually failed with, "One or more independent variables
+not found in data."
+
+# Final Efforts with Top Two
+
+## Combinations of Isolated Improvements
+
+Looking at the running summary, some settings *appeared* to make minor
+improvements beyond the initial tuning, in isolation. I certainly do not
+assume that combining such improvements will result in a combined
+improvement - but I will try some combinations, for the top two models.
+
+The following settings showed some promise for `xgbTree` and `ranger`,
+all somewhat above baseline accuracy. The table is not meant to convey
+combinations; the two columns are independent, each setting was in
+isolation.
+
+```{r echo = FALSE}
+tribble(
+    ~trainControl, ~preProcess, 
+    'adaptive_cv', 'center, scale',
+    'optimism_boot', 'center',
+    'LGOCV', '',
+    'cv', '',
+    'adaptive_LGOCV', '',
+    'repeatedcv', 'center',
+    'LGOCV', 'scale',
+    'cv', 'BoxCox'
+) |>
+    kable() |>
+    kable_styling(
+        bootstrap_options = c('bordered'),
+        full_width = FALSE,
+        position = 'left'
+    ) |>
+    pack_rows(
+        index = c('xgbTree' = 5, 'ranger' = 3),
+        label_row_css = 'text-align:center; background-color: #666; color: #fff;'
+    )
+```
+
+### xgbTree
+
+First, I run the `xgbTree` with many permutations of `trainControl` and
+`preProcess` settings shown above.
+
+```{r warning = FALSE}
+.xgbTree <- bind_rows(
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('BoxCox'),
+        .trControl  = trainControl(method = 'adaptive_cv')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('center'),
+        .trControl  = trainControl(method = 'adaptive_cv')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('scale'),
+        .trControl  = trainControl(method = 'adaptive_cv')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('BoxCox', 'center', 'scale'),
+        .trControl  = trainControl(method = 'adaptive_cv')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('BoxCox'),
+        .trControl  = trainControl(method = 'optimism_boot')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('center'),
+        .trControl  = trainControl(method = 'optimism_boot')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('scale'),
+        .trControl  = trainControl(method = 'optimism_boot')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('BoxCox', 'center', 'scale'),
+        .trControl  = trainControl(method = 'optimism_boot')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('BoxCox'),
+        .trControl  = trainControl(method = 'LGOCV')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('center'),
+        .trControl  = trainControl(method = 'LGOCV')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('scale'),
+        .trControl  = trainControl(method = 'LGOCV')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('BoxCox', 'center', 'scale'),
+        .trControl  = trainControl(method = 'LGOCV')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('BoxCox'),
+        .trControl  = trainControl(method = 'cv')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('center'),
+        .trControl  = trainControl(method = 'cv')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('scale'),
+        .trControl  = trainControl(method = 'cv')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('BoxCox', 'center', 'scale'),
+        .trControl  = trainControl(method = 'cv')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('BoxCox'),
+        .trControl  = trainControl(method = 'adaptive_LGOCV')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('center'),
+        .trControl  = trainControl(method = 'adaptive_LGOCV')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('scale'),
+        .trControl  = trainControl(method = 'adaptive_LGOCV')
+    ),
+    execute_models(
+        .models     = c('xgbTree'),
+        .preProcess = c('BoxCox', 'center', 'scale'),
+        .trControl  = trainControl(method = 'adaptive_LGOCV')
+    )
+)
+```
+
+And the results:
+
+```{r message = FALSE}
+bind_cols(
+        c(
+            rep('adaptive_cv', 4),
+            rep('optimism_boot', 4),
+            rep('LGOCV', 4),
+            rep('cv', 4),
+            rep('adaptive_LGOCV', 4)
+        ),
+        c(
+            rep(c('BoxCox', 'center', 'scale', 'BoxCox,center,scale'), 5)
+        ),
+       .xgbTree
+) |> 
+    dplyr::rename(
+        trControl = c(1),
+        preProcess = c(2),
+        Accuracy = c(3)
+    ) |>
+    datatable(
+        rownames = FALSE,
+        width    = '50%',
+        caption  = 'xgbTree',
+        options  = list(dom = 't', pageLength = nrow(.xgbTree))
+    )
+```
+
+### ranger
+
+Now the same for `ranger`.
+
+```{r warning = FALSE}
+.ranger <- bind_rows(
+    execute_models(
+        .models = c('ranger'),
+        .preProcess = c('BoxCox'),
+        .trControl = trainControl(method = 'repeatedcv')
+    ),
+    execute_models(
+        .models = c('ranger'),
+        .preProcess = c('center'),
+        .trControl = trainControl(method = 'repeatedcv')
+    ),
+    execute_models(
+        .models = c('ranger'),
+        .preProcess = c('scale'),
+        .trControl = trainControl(method = 'repeatedcv')
+    ),
+    execute_models(
+        .models = c('ranger'),
+        .preProcess = c('BoxCox', 'center', 'scale'),
+        .trControl = trainControl(method = 'repeatedcv')
+    ),
+    execute_models(
+        .models = c('ranger'),
+        .preProcess = c('BoxCox'),
+        .trControl = trainControl(method = 'LGOCV')
+    ),
+    execute_models(
+        .models = c('ranger'),
+        .preProcess = c('center'),
+        .trControl = trainControl(method = 'LGOCV')
+    ),
+    execute_models(
+        .models = c('ranger'),
+        .preProcess = c('scale'),
+        .trControl = trainControl(method = 'LGOCV')
+    ),
+    execute_models(
+        .models = c('ranger'),
+        .preProcess = c('BoxCox', 'center', 'scale'),
+        .trControl = trainControl(method = 'LGOCV')
+    ),
+    execute_models(
+        .models = c('ranger'),
+        .preProcess = c('BoxCox'),
+        .trControl = trainControl(method = 'cv')
+    ),
+    execute_models(
+        .models = c('ranger'),
+        .preProcess = c('center'),
+        .trControl = trainControl(method = 'cv')
+    ),
+    execute_models(
+        .models = c('ranger'),
+        .preProcess = c('scale'),
+        .trControl = trainControl(method = 'cv')
+    ),
+    execute_models(
+        .models = c('ranger'),
+        .preProcess = c('BoxCox', 'center', 'scale'),
+        .trControl = trainControl(method = 'cv')
+    )
+)
+```
+
+And the results:
+
+```{r message = FALSE}
+bind_cols(
+        c(
+            rep('repeatedcv', 4),
+            rep('LGOCV', 4),
+            rep('cv', 4)
+        ),
+        c(
+            rep(c('BoxCox', 'center', 'scale', 'BoxCox,center,scale'), 3)
+        ),
+       .ranger
+) |> 
+    dplyr::rename(
+        trControl = c(1),
+        preProcess = c(2),
+        Accuracy = c(3)
+    ) |>
+    datatable(
+        rownames = FALSE,
+        width    = '50%',
+        caption  = 'ranger',
+        options  = list(dom = 't', pageLength = nrow(.ranger))
+    )
+```
+
+I will stop there, having turned every dial I can conceive.
+
+# Loose Ends
+
+## Ranger Case- and Class Weights
+
+`ranger` supports case- and class weights. I have used them before and
+know they can be very effective at balancing lopsided data. So far I've
+found the balancing to be a zero-sum effort in terms of accuracy/RMSE;
+for example, accuracy for true negatives may improve at the expense of
+true positives.
+
+I create case weights (weighing each observation) with
+`parsnip::importance_weights` and, just a guess, `rowSds`.
+
+To weigh the two classes, I refer again to [this
+article](https://medium.com/@ravi.abhinav4/improving-class-imbalance-with-class-weights-in-machine-learning-af072fdd4aa4).
+
+```{r}
+.case_weights = parsnip::importance_weights(
+    rowSds(train_df[1:4] |> as.matrix()) |>
+    as.vector()
+)
+.class_weights <- c(
+    nrow(train_df) / (2 * sum(train_df$disease_present == 0)),
+    nrow(train_df) / (2 * sum(train_df$disease_present == 1))
+)
+```
+
+I know from the past that weights may work seamlessly via `train` for
+*bootstrap methods*; but fail for cross-validation methods. This makes
+sense, as each cross-validation fold will be shorter in length than the
+full list of weights. I use a known workaround for cv, after trying
+`train` and bootstrap.
+
+### Weights with Bootstrap via Train
+
+```{r warning = FALSE}
+.boot <- bind_rows(
+      execute_models(
+          .models        = c('ranger'),
+          .trControl     = trainControl(method = 'boot'),
+          .preProcess    = c('center')
+      ),
+      execute_models(
+          .models        = c('ranger'),
+          .trControl     = trainControl(method = 'boot'),
+          .preProcess    = c('center'),
+          case.weights   = list(.case_weights)
+      ),
+      execute_models(
+          .models        = c('ranger'),
+          .trControl     = trainControl(method = 'boot'),
+          .preProcess    = c('center'),
+          class.weights  = list(.class_weights)
+      ),
+      execute_models(
+          .models        = c('ranger'),
+          .trControl     = trainControl(method = 'boot'),
+          .preProcess    = c('center'),
+          case.weights   = list(.case_weights),
+          class.weights  = list(.class_weights)
+      )
+)
+```
+
+### Weights with Cross-Validation
+
+Here I simulate cross-validation per [this
+solution](https://github.com/imbs-hl/ranger/issues/419), iterating over
+10 folds. It begs the question though, given one accuracy result per
+fold, what is the final accuracy? Perhaps average?
+
+```{r}
+n            <- nrow(train_df)
+num_folds    <- 10
+folds        <- split(sample(n), cut(1:n, num_folds, labels = FALSE))
+
+.cv <- sapply(folds, function(fold) {
+    .test  <- train_df[fold,]
+    .train <- train_df[-fold,]
+    fit    <- ranger(factor(disease_present) ~ ., .train)
+    fit_a  <- ranger(factor(disease_present) ~ ., .train, case.weights = .case_weights[-fold])
+    fit_b  <- ranger(factor(disease_present) ~ ., .train, class.weights = .class_weights)
+    fit_ab <- ranger(factor(disease_present) ~ ., .train, case.weights = .case_weights[-fold], class.weights = .class_weights)
+    c(
+        baseline     = accuracy(fit, .test),
+        caseWeights  = accuracy(fit_a, .test),
+        classWeights = accuracy(fit_b, .test),
+        bothWeights  = accuracy(fit_ab, .test)
+    )
+})
+```
+
+And the results:
+
+```{r message = FALSE}
+bind_cols(
+    c('baseline', 'caseWeights', 'classWeights', 'bothWeights'),
+    .cv,
+    .boot
+) |> kable(col.names = c('', paste(rep('fold',10), 1:10), '')) |>
+     add_header_above(c('', 'cross-validation' = 10, 'boot' = 1)) |>
+     kable_styling(
+         bootstrap_options = c('bordered', 'striped'),
+         full_width = FALSE,
+         position = 'left'
+    )
+```
+
+I conclude that neither class- nor case weights help accuracy here.
+(Granted, my calculation for case weights was guesswork.)
+
+I leave open the question whether weights helped balance specificity and
+sensitivity.
+
+### Weights with dplyr
+
+[This article](https://www.tidyverse.org/blog/2022/05/case-weights/)
+suggests another approach, which I will try here.
+
+```{r warning = FALSE}
+execute_models(
+    .models        = c('ranger'),
+    .trControl     = trainControl(method = 'cv'),
+    .preProcess    = c('center'),
+    .train         = train_df |> dplyr::mutate(
+        case_wts = parsnip::importance_weights(.class_weights[disease_present+1])
+    ),
+    .test          = test_df  |> dplyr::mutate(
+        case_wts = parsnip::importance_weights(.class_weights[disease_present+1])
+    )
+) |>
+    kable(col.names = c('', 'Accuracy?!')) |>
+    kable_styling(bootstrap_options = 'bordered', full_width = FALSE, position = 'left')
+```
+
+Hold on, this *must* be cheating - it creates another binary column
+having 100% correlation with the outcome...
+
+This seems equivalent to setting `case_wts = disease_present`, or adding
+the outcome to the right hand side of the formula, e.g.
+`factor(disease_present) ~ . + disease_present` (both of which also give
+100% accuracy.)
+
+## Custom-Tuning Ranger
+
+While poking around, I found
+[tuneRanger](https://cran.r-project.org/web/packages/tuneRanger/tuneRanger.pdf).
+Its `tuneMtryFast` indicates that the out-of-bag (OOB) error varies very
+little for any `mtry` near 1. The plot looks dramatic but note the tiny
+range on the y-axis. (I would not have guessed that `mtry` could be zero
+or fractional.)
+
+```{r results = FALSE, message = FALSE, error = FALSE, warning = FALSE}
+sink(nullfile())
+res <- tuneMtryFast(
+    fc,
+    data       = train_df,
+    mtryStart  = .1,
+    stepFactor = .1,
+    improve    = .05,
+    trace      = FALSE,
+    plot       = FALSE
+)
+sink()
+plot(res, type = 'b')
+```
+
+### Comparing tuneRanger/ranger and Positive Class
+
+The package also provides some other tools worth trying. Here I try
+`tuneRanger`, which first needs a "task" object from `mlr`. Then,
+evidently, `estimateTimeTuneRanger` will estimate how long to expect to
+process the "task" with `tuneRanger`; and a prediction can be made with
+the result of `tuneRanger`.
+
+Out of curiosity I also fit `ranger` directly with the recommended
+tuning from `tuneRanger` to compare their accuracy.
+
+While preparing this, I notice `makeCLassifTask` has a `positive`
+parameter to indicate the positive class, so I put this in a repeatable
+function and collect the metrics for both classes.
+
+```{r}
+compare_tuneRanger_and_ranger <- function(positive_class) {
+    # 1. Create classification task
+    task <- mlr::makeClassifTask(
+        data     = train_df,
+        target   = 'disease_present',
+        positive = positive_class 
+    )
+    
+    # 2. Get its estimated execution time (suppressing other output)
+    sink(nullfile())
+    etime <- estimateTimeTuneRanger(task)
+    sink()
+    
+    # 3. Execute task, capturing time
+    rtime <- system.time(
+        res <- tuneRanger(
+            task,
+            measure        = list(acc), # or multiclass.brier,, auc, logloss, ...
+            num.trees      = 1000,
+            num.threads    = 2,
+            iters          = 20,
+            save.file.path = NULL,
+            show.info      = FALSE
+        )
+    )
+
+    # 4. Predict with tuneRanger model
+    pred      <- predict(res$model, newdata = test_df)
+    
+    # 5. Calculate its accuracy
+    tuned_acc <- pred$data |>
+        as.data.frame() |>
+        dplyr::summarize(acc = 100*sum(truth == response)/n()) |>
+        pull(acc)
+    
+    # 6. Fit ranger with the recommended parameter settings
+    fit <- ranger(
+        fc,
+        train_df,
+        mtry            = res$recommended.pars$mtry,
+        min.node.size   = res$recommended.pars$min.node.size,
+        sample.fraction = res$recommended.pars$sample.fraction
+    )
+
+    # 7. Report it
+    tribble(
+        ~PositiveClass, ~Estimated, ~Actual,
+        ~Estimated, ~tuneRanger, ~ranger,
+        ~mtry, ~min.node.size, ~sample.fraction,
+        positive_class, etime, rtime['elapsed'],
+        100*res$recommended.pars$acc,
+        tuned_acc,
+        accuracy(fit, test_df),
+        res$recommended.pars$mtry,
+        res$recommended.pars$min.node.size,
+        round(res$recommended.pars$sample.fraction, 4)
+    )
+}
+
+# 8. Blend the results
+class1 <- compare_tuneRanger_and_ranger(positive_class = 1)
+class0 <- compare_tuneRanger_and_ranger(positive_class = 0)
+rbind(class1, class0) |>
+    kable(digits = 3) |>
+    add_header_above(
+        c(' ' = 1, 'Time' = 2, 'Accuracy' = 3, 'Recommendations' = 3),
+        underline = TRUE
+    ) |> 
+    kable_styling(
+        bootstrap_options = 'bordered',
+        full_width = FALSE,
+        position = 'left'
+    )
+```
+
+The differences are negligible and vary between runs. I conclude there
+is no effective difference.
+
+## Positive Class, Factor Order
+
+Here I make one more comparison - fitting and predicting with `ranger`
+against `train_df` and `test_df` as-is, with implicit factor ordering of
+0, 1; and then again with explicit factor-ordering of 1,0.
+
+```{r}
+which_class <- function(.train = train_df, .test = test_df) {
+    fit  <- ranger(fc, .train)
+    pred <- predict(fit, .test)
+    cm   <- confusionMatrix(pred$predictions, factor(.test$disease_present))
+    c(
+        accuracy = 100*cm$overall[['Accuracy']],
+        correct  = diag(cm$table) |> sort()
+    )
+}
+
+zero_first <- which_class()
+one_first  <- which_class(
+    train_df |> mutate(disease_present = factor(disease_present, ordered=T, levels=c(1,0))),
+    test_df  |> mutate(disease_present = factor(disease_present, ordered=T, levels=c(1,0)))
+)
+    
+cbind(zero_first, one_first) |>
+    kable(caption = 'Factor Order Effect?') |>
+    kable_styling(full_width = FALSE, position = 'left')
+```
+
+Additional evidence for the same conclusion - differences are minimal
+and variable.
+
+## RandomForest Decision Tree
+
+I like to get a glimpse into the "thinking" of these models, and for
+that I look to a `randomForest` decision tree. Unfortunately there is a
+trade-off between depth of information and clarity. To help, I shorten
+the column names and hackishly round digits to two decimals.
+
+```{r message = FALSE, fig.width = 14, fig.height = 14}
+fit <- randomForest(
+    factor(disease_present) ~ .,
+    train_df |> dplyr::rename(h2o = rainfall, tmp = temperature, pH = soil_ph, hum = humidity),
+    ntree = 20
+)
+simplest_tree <- which.min(fit$forest$ndbigtree)
+fit$forest$xbestsplit <- round(fit$forest$xbestsplit, 2)  # 'digits' workaround
+plot.getTree(
+    fit,
+    k     = simplest_tree,
+    depth = 6,
+    main  = 'RandomForest Decision Tree'
+)
+```
+
+## RandomForest - Other Metrics
+
+Here I look at metrics in addition to accuracy.
+
+Prevalence was known from the [class distribution](#class_distribution),
+the 75% portion of the positive class (0, healthy).
+
+Sensitivity, or true positive, is high; and Specificity, or true
+negative, is fairly low. It seems plausible that those numbers are
+reflective of the 75/25% distribution.
+
+I am uncertain what to conclude. Accuracy and precision seem pretty
+good, but sensitivity and specificity are not well balanced.
+
+```{r}
+metrics <- c('Prevalence', 'Sensitivity', 'Specificity', 'Precision', 'F1')
+fit   <- randomForest(factor(disease_present) ~ ., train_df, ntree = 20)
+pred  <- predict(fit, test_df)
+cm    <- confusionMatrix(pred, factor(test_df$disease_present))
+cm$byClass |>
+    as.data.frame() |>
+    rownames_to_column() |>
+    pivot_wider(names_from = rowname, values_from = `cm$byClass`) |>
+    select(all_of(metrics)) |>
+    mutate(
+        Accuracy = cm$overall[['Accuracy']]*100,
+        F_meas   = caret::F_meas(
+            data      = factor(train_df$disease_present),
+            reference = factor(test_df$disease_present)
+        )
+    ) |>
+    knitr::kable(digits = 3, caption = 'Ranger Classification Metrics') |>
+    kable_styling(bootstrap_options = 'bordered', full_width = FALSE, position = 'left')
+```
+
+# Conclusions
+
+Once again, I have not been able to improve models significantly beyond
+what I consider the baseline. It seems the models' default modes are
+nearly ideal. But, as mentioned in the [Introduction](#introduction) I'm
+gauging against [others on
+Kaggle](https://www.kaggle.com/datasets/turakut/plant-disease-classification/code),
+and my best of 87% rivals what I've seen.
+
+My primary goal was to continue learning, and here in particular I
+learned:
+
+-   `sink` and `nullfile`, for something analogous to `> /dev/null`
+
+    But - danger, danger - do not leave a lingering `sink` object!
+
+-   `curl_download`, to pull down Kaggle data without API credentials
+
+-   ellipsis (`...`) argument, used here to make my model framework
+    smaller and more flexible
+
+-   more `kable`, especially making narrow tables NOT full width, and
+    left-aligned
+
+-   `labeller`, for plotting meaningful words instead of 0,1
+
+-   `tuneRanger` package and tools
+
+-   `datatable`, which I used via Perl years ago
+
+-   the effect, if any, of which class is positive
+
+-   `tryCatch`, to make the framework more robust
+
+This was my first major exposure to library conflicts. I believe the
+only instance I had seen prior was needing to fully qualify
+`dplyr::select`. Here, I also had to qualify `ggcorrplot::cor_pmat` and
+`caret::train`, neither of which was the least bit obvious; and later
+`dplyr::rename` and `dplyr::mutate`. I am beginning to think that
+fully-qualifying is a good practice.
+
+This project turned up a few new interesting topics that I will revisit
+in upcoming projects.
+
+-   Using [tidymodels](https://tune.tidymodels.org) and associated
+    packages to create tuning recipes and workflows, which seems to be
+    an alternative to `train`
+-   Using
+    [dtree](https://www.rdocumentation.org/packages/dtree/versions/0.4.2/topics/dtree),
+    for what seems to provide a simple ensemble of decision-tree models
+-   Perhaps [function
+    factories](https://adv-r.hadley.nz/function-factories.html) to
+    reduce near-redundant code in my framework
+
+# References
+
+<https://stackoverflow.com/questions/48764060/portable-null-device-in-r>
+
+[https://medium.com/\@asimango/the-positive-class-what-should-it-be-in-a-machine-learning-binary-classification-problem-36c316da1127](https://medium.com/@asimango/the-positive-class-what-should-it-be-in-a-machine-learning-binary-classification-problem-36c316da1127){.uri}
+
+[https://adv-r.hadley.nz/function-factories.html#function-factories](https://adv-r.hadley.nz/function-factories.html){.uri}
+
+[https://medium.com/\@ravi.abhinav4/improving-class-imbalance-with-class-weights-in-machine-learning-af072fdd4aa4](https://medium.com/@ravi.abhinav4/improving-class-imbalance-with-class-weights-in-machine-learning-af072fdd4aa4){.uri}
+
+<https://www.tidyverse.org/blog/2022/05/case-weights/>
