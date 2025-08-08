@@ -1,0 +1,32 @@
+Package: data.frame.X
+Type: Package
+Title: Simplified visualization methods for a 'data.frame'
+Version: 0.1.1
+Authors@R: c(
+    person(
+      "hbmaclean",
+      email = "hbmacl@gmail.com",
+      role = c("aut", "cre")
+    )
+  )
+Description: Intended to be an ever-growing collection of methods pertaining to
+    analyzing and plotting a 'data.frame'.
+License: use_gpl_license()
+Encoding: UTF-8
+LazyData: true
+Imports:
+    dplyr,
+    tidyr,
+    tibble,
+    caret,
+    knitr,
+    kableExtra,
+    ggcorrplot,
+    gridExtra,
+    grid,
+    stats,
+    rstatix
+Depends:
+    ggplot2
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
