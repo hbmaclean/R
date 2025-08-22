@@ -1,3 +1,5 @@
 exportPattern("^[[:alpha:]]+")
 importFrom("stats", "as.formula", "cor", "filter", "prcomp", "reorder")
 importFrom("utils", "install.packages")
+importFrom("gridExtra", "grid.arrange")
+importFrom("grid", "textGrob", "gpar")

@@ -63,7 +63,7 @@ as_numeric_df <- function(df) {
 #'
 #' @param   df data.frame object
 #' @param   tabular = FALSE
-#' @returns tribble of truths, or kable-styled table if tabular=TRUE
+#' @returns sum of each metric, as a tribble or kable-styled table if tabular=TRUE
 #' @export
 any_NA_dup_outliers <- function(df, tabular = FALSE) {
     if (!is_numeric_df(df)) {
@@ -73,10 +73,10 @@ any_NA_dup_outliers <- function(df, tabular = FALSE) {
 
     moe <- tribble(
         ~missing, ~duplicate, ~outlying, ~extreme,
-        any(is.na(df)),
-        any(duplicated(df)),
-        any(rstatix::is_outlier(df |> as.matrix())),
-        any(rstatix::is_extreme(df |> as.matrix()))
+        sum(is.na(df)),
+        sum(duplicated(df)),
+        sum(rstatix::is_outlier(df |> as.matrix())),
+        sum(rstatix::is_extreme(df |> as.matrix()))
     )
 
     if (tabular) {

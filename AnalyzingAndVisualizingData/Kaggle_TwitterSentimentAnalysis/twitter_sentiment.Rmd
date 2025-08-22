@@ -1,0 +1,1004 @@
+---
+title: "Kaggle Twitter Sentiment Analysis"
+author: "hbmaclean"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    df_print: paged
+    code_folding: show
+editor_options:
+  markdown:
+    toc: true
+    wrap: 72
+---
+
+```{css, echo = FALSE}
+h1 {
+    margin-top: 2em;
+    border-bottom: 2px solid black;
+    padding-bottom: 5px;
+}
+h2 {
+    margin-top: 1em;
+}
+h3 {
+    margin-top: 1em;
+}
+p {
+    margin-top: 2px;
+}
+table {
+    margin-top: 1em;
+    margin-bottom: 1em;
+    background: snow;
+}
+th {
+    background: snow;
+}
+img {
+    border: 1px solid black;
+    margin-top: 4px;
+    margin-bottom: 4px;
+    width: 100%;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+Below is a description of the **Twitter Sentiment Analysis Dataset**
+from
+[Kaggle](https://www.kaggle.com/datasets/jp797498e/twitter-entity-sentiment-analysis/data).
+
+> **Overview**
+>
+> This is an entity-level sentiment analysis dataset of twitter. Given a
+> message and an entity, the task is to judge the sentiment of the
+> message about the entity. There are three classes in this dataset:
+> Positive, Negative and Neutral. We regard messages that are not
+> relevant to the entity (i.e. Irrelevant) as Neutral.
+>
+> **Usage**
+>
+> Please use `twitter_training.csv` as the training set
+> and `twitter_validation.csv` as the validation set. Top 1
+> classification accuracy is used as the metric.
+
+# Importing Packages
+
+```{r warning = FALSE, message = FALSE}
+library(data.frame.X)
+install_packages(c(
+    'curl', 'stringr', 'dplyr', 'tidyr', 'caret', 'tibble', 'kableExtra', 'DT',
+    'syuzhet', 'ranger', 'randomForest', 'devtools'
+))
+
+install_github('munoztd0/reprtree')
+eval(substitute(library(pkg), list(pkg='reprtree')))
+library(reprtree)
+
+set.seed(45245)
+```
+
+# Fetching the Data
+
+In this case, the data is pre-partitioned into training and validation.
+This downloads the zip and extracts and reads each CSV into a
+data.frame. Given the note in the data description above, this also
+mutates "irrelevant" to "neutral".
+
+```{r}
+fetch_data <- function() {
+    options(timeout = 120)
+    url <- paste0(
+        'https://www.kaggle.com/api/v1/datasets/download/',
+        'jp797498e/twitter-entity-sentiment-analysis'
+    )
+    tmp <- tempfile()
+    curl_download(url, tmp)
+    cols <- c('id', 'entity', 'sentiment', 'content')
+    train_df <<- as.data.frame(
+        read.csv(
+            unz(tmp, 'twitter_training.csv'),
+            header = FALSE,
+            col.names = cols
+        )
+    ) |>
+        mutate(sentiment = ifelse(sentiment == 'Irrelevant', 'Neutral', sentiment))
+
+    test_df <<- as.data.frame(
+        read.csv(
+            unz(tmp, 'twitter_validation.csv'),
+            header = FALSE,
+            col.names = cols
+        )
+    ) |>
+        mutate(sentiment = ifelse(sentiment == 'Irrelevant', 'Neutral', sentiment))
+
+}
+fetch_data()
+sample_n(test_df, 5) |> union_all(sample_n(train_df, 5)) |>
+    datatable(rownames = FALSE, options = list(dom = 't', pageLength = nrow(.data)))
+```
+
+# Initial Data Analysis
+
+Here I run through the typical first inspection.
+
+## Check for NAs, Duplicates, and Outliers
+
+Are there any NAs, duplicates, outliers, or extreme values?
+
+```{r warning = FALSE}
+any_NA_dup_outliers(train_df, tabular = TRUE)
+```
+
+Ah hold on, the `id` column surely has no predictive value, and has such
+a range that it will inherently have outliers and extreme values, and
+perhaps duplicates. I will remove that column and try again:
+
+```{r warning = FALSE}
+test_df$id  <- NULL
+train_df$id <- NULL
+any_NA_dup_outliers(train_df) |>
+    add_row(any_NA_dup_outliers((test_df))) |>
+    kable(align = 'c') |>
+    kable_styling(
+        bootstrap_options = c('bordered'),
+        full_width = FALSE, position = 'left'
+    ) |>
+    pack_rows(
+        index = c('train' = 1, 'test' = 1),
+        label_row_css = 'text-align:center; background-color: #666; color: #fff;'
+    )
+```
+
+The training set has duplicates to be purged.
+
+```{r}
+train_df  <- distinct(train_df)
+```
+
+## PCA, Correlation, and Variation
+
+With the three remaining columns, it is clear that the tweet content
+bears all significant variability and predictive power - I will not even
+look at PCA, correlation, or variation.
+
+However, I assume that one tweet word may have different sentiment
+values for different entities - e.g. that "murder" is evidently positive
+for Borderlands, but presumably negative for Amazon, etc. I am assuming
+a correlation between `entity` and the sentiments of `content`, but at a
+word-level that I cannot simply check with `corr`. I will call this the
+entity-effect.
+
+## Simple Classification Check
+
+Here I arbitrarily pick `ranger` as a classification model and run it as
+plain as can be (as a function, to be called again later.)
+
+```{r}
+vanilla_classification <- function(.train = train_df, .test = test_df) {
+    etime <- system.time(
+        fit  <- ranger(factor(sentiment) ~ ., .train)
+    )
+    pred <- predict(fit, .test)
+    
+    cols <- c('Class', 'Prevalence', 'Sensitivity', 'Specificity', 'Precision', 'F1')
+    .cm  <- confusionMatrix(pred$predictions, factor(.test$sentiment))
+    .cm$byClass |>
+        as.data.frame() |>
+        rownames_to_column(var = 'Class') |>
+        select(all_of(cols)) |>
+        kable(
+            digits  = 3,
+            caption = sprintf(
+                'Ranger Classification Metrics - Accuracy %%%.2f; ranger time %.2f(s)',
+                .cm$overall[['Accuracy']]*100,
+                etime['elapsed']
+            )
+        ) |>
+        kable_styling(
+            bootstrap_options = 'bordered',
+            full_width = FALSE,
+            position = 'left'
+        )
+}
+vanilla_classification()
+```
+
+Almost 60% - almost twice the chance of guessing; with an interesting
+imbalance between sensitivity and specificity.
+
+# Tweet Content - Lexicon Sentiments
+
+The tweet content looks pretty messy, especially URLs (without protocol,
+and often broken up by white space, e.g. "dlvr.it / RMTrgF". Before
+attempting to clean up with regular expressions, I'll see how I fare
+with the data as-is.
+
+In my coursework, I learned of `tidytext`, and its `unnest_tokens`,
+`stop_words` and `get_sentiments` to extract tokens/words from a
+string/column, omit those of little value, and get a "sentiment" for
+each via one of several lexicons. That was a fine way of teaching what
+is involved, but in reviewing for this task I found [Sentiment Analysis
+(Lexicons)](https://rpubs.com/chelseyhill/676279) and a means for
+getting one sentiment for an entire block of text.
+
+I try that below - getting one sentiment per tweet, from four lexicons.
+I also calculate a normalized consensus sentiment, deviating slightly
+from the approach in the article.
+
+```{r}
+train_df <- train_df |>
+    mutate(
+        bing      = syuzhet::get_sentiment(content, method = 'bing'),
+        afinn     = syuzhet::get_sentiment(content, method = 'afinn'),
+        nrc       = syuzhet::get_sentiment(content, method = 'nrc'),
+        syuzhet   = syuzhet::get_sentiment(content, method = 'syuzhet'),
+        consensus = sign(
+            sign(bing) + sign(afinn) + sign(nrc) + sign(syuzhet)
+        )
+    )
+
+test_df <- test_df |>
+    mutate(
+        bing      = syuzhet::get_sentiment(content, method = 'bing'),
+        afinn     = syuzhet::get_sentiment(content, method = 'afinn'),
+        nrc       = syuzhet::get_sentiment(content, method = 'nrc'),
+        syuzhet   = syuzhet::get_sentiment(content, method = 'syuzhet'),
+        consensus = sign(
+            sign(bing) + sign(afinn) + sign(nrc) + sign(syuzhet)
+        )
+    )
+```
+
+And now to see what difference that made:
+
+```{r}
+vanilla_classification()
+```
+
+Much improved accuracy; much better balanced sensitivity and
+specificity; and/but longer runtime, as expected.
+
+Note:
+
+-   `syuzhet` also supports a `stanford` lexicon, for which you must
+    install `coreNLP` and provide its path via 'path_to_tagger'.
+-   Evidently "syuzhet" is a Russian term for "plot" or "storyline".
+
+## PCA and Correlation!
+
+With the additional columns, PCA (`prcomp`) and Correlation (`cor`) get
+more interesting. Granted, there are not many columns, but two PCs
+account for 85% of the overall variance.
+
+```{r warning = FALSE}
+pca_plot(train_df, pct = .85, which = 'bar')
+```
+
+Two columns, `content` and `entity`, have a 97% correlation. I had
+already hoped that `content` is unnecessary with the additional
+sentiment columns. `bing`, `syuzhet`, and `afinn` all correlate strongly
+(80+%), `nrc` appears to be an outsider. Alas, evidently nothing
+correlates strongly with `sentiment`.
+
+```{r warning = FALSE}
+corr_plot(train_df)
+```
+
+Conclusion: `pca` and `corr` may be good `preProcess` options for
+`train`. Defaults for `preProcess` are `thresh = .95` for `pca` and
+`cutoff = .9` for `corr`. I will also consider dropping `nrc`, or at
+least omitting it via formula; and the same with `content`.
+
+# Data Cleanup
+
+Here I convert the remaining non-numeric data to numbers; check whether
+`content` is still necessary given the summarized lexicon sentiments;
+whether all the new lexicon sentiment columns are necessary; and check
+again for resulting duplicates.
+
+## Making it Numeric
+
+I have cycled through this process numerous times. Once, dropping
+`content` had comparable accuracy, so I did. Another time, it lowered
+accuracy by %10 so I did not - but then hit the 16GB vector limit. Here
+I drop it regardless, and then convert `entitity` and `sentiment` to
+numeric.
+
+While at it, I round `syuzhet` to three decimals, which in turn
+introduces tens of duplicates.
+
+```{r}
+unq_sentiments <- unique(c(train_df$sentiment, test_df$sentiment))
+unq_entities   <- unique(c(train_df$entity, test_df$entity))
+
+train_df <- train_df |> mutate(
+    content   = NULL,
+    sentiment = match(sentiment, unq_sentiments) -2,
+    entity    = match(entity, unq_entities),
+    syuzhet   = round(syuzhet, 3)
+)
+test_df <-test_df |> mutate(
+    content   = NULL,
+    sentiment = match(sentiment, unq_sentiments) -2,
+    entity    = match(entity, unq_entities),
+    syuzhet   = round(syuzhet, 3)
+)
+
+vanilla_classification()
+```
+
+## Partitioning
+
+Here I partition into train/test, after tucking aside full copies for
+later. Note, it is extremely tempting to drop duplicate rows, now about
+53%(!) but accuracy plummets.
+
+```{r}
+train_org <- train_df
+test_org  <- test_df
+
+index     <- createDataPartition(y = train_df$sentiment, times = 1, p = 0.5, list = FALSE)
+train_df  <- train_df[index,]
+test_df   <- train_df[-index,]
+
+vanilla_classification()
+```
+
+Faster, obviously; and more accurate (against partitioned half vs.
+actual test set.)
+
+## Accuracy without 'nrc'
+
+```{r}
+vanilla_classification(
+    .train = train_df |> select(-c(nrc)),
+    .test =  test_df  |> select(-c(nrc))
+)
+```
+
+## Accuracy without 'afinn'
+
+```{r}
+vanilla_classification(
+    .train = train_df |> select(-c(afinn)),
+    .test =  test_df  |> select(-c(afinn)))
+```
+
+## Accuracy without 'bing'
+
+```{r}
+vanilla_classification(
+    .train = train_df |> select(-c(bing)),
+    .test =  test_df  |> select(-c(bing))
+)
+```
+
+## Accuracy without 'syuzhet'
+
+```{r}
+vanilla_classification(
+    .train = train_df |> select(-c(syuzhet)),
+    .test =  test_df  |> select(-c(syuzhet))
+)
+```
+
+## Accuracy without 'consensus'
+
+```{r}
+vanilla_classification(
+    .train = train_df |> select(-c(consensus)),
+    .test  = test_df  |> select(-c(consensus))
+)
+```
+
+## Dropping 'bing' and 'consensus'
+
+Accuracy is stable to improved without `bing` and `consensus` - so herte
+I drop them.
+
+```{r}
+train_df$bing  <- train_df$consensus  <- NULL
+test_df$bing   <- test_df$consensus   <- NULL
+train_org$bing <- train_org$consensus <- NULL
+test_org$bing  <- test_org$consensus  <- NULL
+
+vanilla_classification()
+```
+
+# Initial Multi-Model Framework
+
+Here I create functions for making predictions, calculating accuracy,
+running individual models, tracking results, and easily running them all
+together. The goal is to run numerous models and then narrow down to the
+most accurate one or few.
+
+## Predictions and Accuracy
+
+Below are functions to make predictions and calculate accuracy, using
+the
+[ellipsis](https://cran.r-project.org/web/packages/ellipsis/ellipsis.pdf)
+argument to allow model nuances to be passed in.
+
+```{r}
+predictions <- function(model, test_df, type = 'class') {
+    tryCatch({
+        .pred <- predict(model, test_df, type = type)
+    }, 
+    error = function(e) {
+        print(c(Model = model, error = e))
+    },
+    finally = {
+        if(!is.atomic(.pred)) {
+            .pred <- .pred$predictions
+        }
+        return(.pred)
+    })
+}
+
+accuracy <- function(model, test_df, ...) {
+    tryCatch({
+        .pred <- predictions(model, test_df, ...)
+        .cm   <- confusionMatrix(.pred, as.factor(test_df$sentiment))
+    },
+    error = function(e) {
+        print(c(Model = model, error = e))
+    },
+    finally = {
+        if (!exists('.cm')) {
+            return(NA)
+        }
+        else {
+            return(round(100*.cm$overall[['Accuracy']],2))
+        }
+    })
+}
+```
+
+## Formula and Models
+
+And here, a basic formula; and a function for each model plus the type
+for the underlying `predict` - generally 'class' or 'response'.
+
+```{r}
+fc <- as.formula(factor(sentiment) ~ .)
+models <- list(
+    ranger       = list(
+        FUNC = function(...) { ranger(...) },
+        TYPE = 'response'
+    ),
+    randomForest = list(
+        FUNC = function(...) { randomForest(..., ntree = 20) },
+        TYPE = 'response'
+    ),
+    knn3         = list(
+        FUNC = function(...) { knn3(...) },
+        TYPE = 'class'
+    )
+)
+```
+
+**Notes:**
+
+1.  Originally, I had six models - the above three plus `multinom`,
+    `native_bayes`, and `avNNet`. I eventually pared it down to shave
+    execution time.
+2.  `ranger` was uniquely problematic here. Originally, rather than
+    `TYPE`, I set this up as `extraArgs` with a value of
+    `c(type = 'class')` for example, or `NULL` if the underlying default
+    was sufficient. But `ranger` gave, *Error: Expecting a single value:
+    [extent=0]* when `extraArgs` was `NULL`; and *Error: Not compatible
+    with requested type: [type=character; target=logical]* when
+    `extraArgs` was `c(type = 'response')`. All other models behaved as
+    expected, with a key-value pair or `NULL`.
+
+## Model Runner
+
+Finally, a function to actually run the models and accumulate metrics.
+
+```{r}
+.run_model <- function(cfg, .formula, .train, .test) {
+    FUNC <- cfg$FUNC
+    TYPE <- cfg$TYPE
+    accuracy(
+        get("FUNC")(.formula, .train),
+        .test, type = TYPE
+    )
+}
+
+run_models <- function(
+        .models  = models,
+        .formula = fc,
+        .train   = train_df,
+        .test    = test_df
+    ) {
+        results <- sapply(names(.models), function(model) {
+            .run_model(.models[[model]], .formula, .train, .test)
+        })
+        names(results) <- names(.models)
+        return(results)
+}
+```
+
+## Metrics Summary
+
+Below, a function to display the metrics. At the moment, the expectation
+is that the named vector from `run_models` will be bound with an initial
+column of meaningful labels.
+
+```{r}
+display_summary <- function(.data) {
+    .data |>
+        dplyr::rename(` ` = c(1)) |>
+        datatable(
+            rownames = FALSE,
+            options  = list(
+                dom        = 't',
+                pageLength = nrow(.data)
+            )
+        )
+}
+```
+
+## Initial Runs - Baseline, Scaling, Centering
+
+With the framework defined, I run the models again with the lexicon
+columns scaled, centered, and scaled+centered.
+
+```{r warning = FALSE, message = FALSE}
+baselines <- run_models()
+baselines |>
+    as.data.frame() |>
+    arrange(desc(baselines)) |>
+    kable(col.names = c('Model', 'Accuracy')) |>
+    kable_styling(full_width = FALSE, position = 'left')
+```
+
+# Second Multi-Model Framework - train()
+
+## Models and Tuning
+
+I will stick with `ranger` and add in `Rborist` and `treebag`.
+
+First, I define a list of NULL `trControl`, `tuneGrid`, and `preProcess`
+objects (and maybe `extraArgs`, but there is a rant coming up.)
+
+```{r}
+train_config <- list(
+    ranger = list(
+        trControl  = NULL,
+        tuneGrid   = NULL,
+        preProcess = NULL,
+        extraArgs  = NULL
+    ),
+    Rborist = list(
+        trControl  = NULL,
+        tuneGrid   = NULL,
+        preProcess = NULL,
+        extraArgs  = NULL
+    ),
+    treebag = list(
+        trControl  = NULL,
+        tuneGrid   = NULL,
+        preProcess = NULL,
+        extraArgs  = NULL
+    )
+)
+```
+
+**Note:**
+
+-   Here again, I initially tried many more models in addition to the
+    above: `svmRadial`, `mlp`, `xgbTree`, `gamLoess`, `rocc`, `glmnet`,
+    `vglmContRatio`, `RFlda`, and `lssvmRadial`, chosen arbitrarily from
+    this [caret list](https://rdrr.io/cran/caret/man/models.html) - but
+    they all underperformed by 30% or more, and the execution time was
+    intolerable.
+
+## Running the Models via Train
+
+Here I write a function to generically execute a model via `train` and
+capture its accuracy. Arguments allow for alternate data sets, formula,
+model list, `trControl` and lists of `tuneGrid` objects.
+
+```{r warning = FALSE, message = FALSE}
+.train_model  <- function(
+        model, cfg, .formula, .train, .test, bestTune,
+       .trControl = NULL, .preProcess = NULL
+) {
+    tryCatch({
+        fit <- (function(...) {
+            caret::train(
+                .formula,
+                method     = model,
+                data       = .train,
+                trControl  = dplyr::coalesce(
+                    .trControl,
+                    trainControl(
+                        method = 'repeatedcv',
+                        number = 2,
+                        p      = .5
+                    )
+                ),
+                tuneGrid   = cfg$tuneGrid,
+                preProcess = .preProcess,
+                ...
+            )
+        })() # ideally, (...) 
+    }, error = function(e) {
+        print(c(Model = model, error = e))
+    },
+    finally = {
+        if (exists('fit')) {
+            if (bestTune) {
+                print(c(Model = model, bestTune = fit$bestTune))
+            }
+            return(accuracy(fit, .test, type = 'raw'))
+        }
+    })
+}
+
+train_models <- function(
+    .config       = train_config,
+    .formula      = fc,
+    .train        = train_df,
+    .test         = test_df,
+    bestTune      = FALSE,
+    .trControl    = NULL,
+    .preProcess   = NULL
+) {
+    results <- sapply(names(.config), function(model) {
+        .train_model(
+            model, .config[[model]], .formula, .train, .test,
+            bestTune, .trControl, .preProcess
+        )
+    })
+    names(results) <- names(.config)
+    return(results)
+}
+```
+
+**Notes:**
+
+1.  The inner, anonymous function remains setup to accept extra
+    arguments. I struggled mightily to send SOMETHING (key-value
+    pair(s)) or NOTHING (i.e. *not* `NULL`). The only workaround so far
+    is calling it with or without extra arguments via if/else, defeating
+    the purpose of the ellipsis.
+2.  I also got burned terribly here. Prior to wrapping in `tryCatch`,
+    the function worked in most cases but died with some models for some
+    parameters. Within `tryCatch`, I was getting nothing but `NA` - and
+    a lot of them, even distilled down to one model. It seems `tryCatch`
+    requires an explicit `return` statement, and that without it I was
+    getting the value of the `finally` block...?
+
+## First Runs - Baseline
+
+And now I run what I'll consider a baseline.
+
+```{r warning = FALSE, message = FALSE}
+train_baselines <- train_models()
+train_baselines |>
+    as.data.frame() |>
+    arrange(desc(baselines)) |>
+    kable(col.names = c('Model', 'Accuracy')) |>
+    kable_styling(full_width = FALSE, position = 'left')
+```
+
+Huh, `ranger` declined.
+
+## Tuning the Models
+
+Now I look for improvements via `tuneGrid`, `preProcess`, and
+`trainControl` options.
+
+### tuneGrid
+
+I started with `tuneGrid` and ran the models once without any
+customization and captured their out-of-the-box best `tuneGrid` values;
+then repeated with various ranges around those values. This remains a
+manual and tedious step, and generally not very effective. Below are the
+values I settled upon after several iterations of nothing exciting.
+
+```{r}
+train_config <- list(
+    ranger = list(
+        tuneGrid = expand.grid(
+            mtry          = 3,
+            splitrule     = 'extratrees',
+            min.node.size = 2
+        )
+    ),
+    Rborist = list(
+        tuneGrid = expand.grid(
+            predFixed = 2,
+            minNode   = 3
+        )
+    ),
+    treebag = list(
+    )
+)
+
+bestTunes <- train_models() #bestTune=TRUE)
+bind_rows(baselines, train_baselines, bestTunes) |>
+    as.data.frame() |>
+    kable() |>
+    kable_styling(full_width = FALSE, position = 'left') |>
+    pack_rows(
+        index = c('baseline' = 1, 'train() baseline' = 1, 'bestTune' = 1),
+        label_row_css = 'text-align:center; background-color: #666; color: #fff;'
+    )
+```
+
+This is terribly inconsistent, despite setting seed. Ironically,
+`treebag` tends to change most, in either direction, despite *not*
+having a `tuneGrid`. At least once, `ranger` plummeted 26% despite its
+`tuneGrid` permutations including the values of the initial `bestTune`!
+At any rate, there is generally not enough movement to consider
+worthwhile.
+
+### trainControl
+
+Here I nullify the `trainGrid` settings and look at various
+`trainControl` methods.
+
+```{r warning = FALSE, message = FALSE}
+train_config <- list(
+    ranger = list(
+        tuneGrid = NULL
+    ),
+    Rborist = list(
+        tuneGrid = NULL
+    ),
+    treebag = list(
+        tuneGrid = NULL
+    )
+)
+
+boot_results <- bind_rows(
+    train_models(.trControl = trainControl(
+        method = 'boot', number = 2)),
+    train_models(.trControl = trainControl(
+        method = 'boot632', number = 2)),
+    train_models(.trControl = trainControl(
+        method = 'optimism_boot', number = 2)),
+    train_models(.trControl = trainControl(
+        method = 'boot_all', number = 2))
+)
+
+cv_results <- bind_rows(
+    train_models(.trControl = trainControl(
+        method = 'cv', p = .5, repeats = 2, number = 2)),
+    train_models(.trControl = trainControl(
+        method = 'repeatedcv', p = .5, repeats = 2, number = 2)),
+    train_models(.trControl = trainControl(
+        method = 'LGOCV', p = .5, repeats = 2, number = 2))
+)
+
+train_summary <- bind_cols(
+    c(
+        'boot', 'boot632', 'optimism_boot', 'boot_all',
+        'cv', 'repeatedcv', 'LGOCV'
+    ),
+    bind_rows(boot_results, cv_results)
+)
+
+display_summary(train_summary)
+```
+
+**Note:**
+
+-   There are also 'adaptive_boot', 'adaptive_cv', and 'adaptive_LGOCV'.
+    They produced errors - *adaptive\$min should be less than 2*, and
+    then *adaptive\$min should be greater than 1*, and finally *For
+    adaptive resampling, there needs to be more than one tuning
+    parameter for evaluation*, with `adaptive = list(min = 2, ...)`,
+    `min = 1`, and `min = 1.1`. Infuriatingly, running the same on the
+    command line worked. But for the good, this inspired `tryCatch`.
+
+Conclusion - Again, not enough movement to consider worthwhile.
+
+### preProcess
+
+Now I try various `preProcess` methods. I do not try `scale` or
+`center`, which I've already simulated; nor `cor` since I already
+omitted `content`, half of the strongest correlating pair.
+
+```{r warning = FALSE, message = FALSE}
+pre_results <- bind_rows(
+    train_models(.preProcess = c('BoxCox')),
+    train_models(.preProcess = c('YeoJohnson')),
+    train_models(.preProcess = c('expoTrans')),
+    train_models(.preProcess = c('spatialSign')),
+    train_models(.preProcess = c('pca'))
+)
+
+pre_summary <- bind_cols(
+    c('BoxCox', 'YeoJohnson', 'expoTrans', 'spatialSign', 'pca'),
+    pre_results
+)
+
+display_summary(pre_summary)
+```
+
+**Notes:**
+
+There are numerous other `preProcess` methods:
+
+-   I ruled out `zv` and `nzv`, as any column here with little variance
+    is expected.
+
+-   `knnImpute`, `bagImpute`, and `medianImpute` are not applicable as
+    there are no missing values.
+
+-   I looked further into `conditionalX`. Its description in
+    `preProcess` help left me uncertain, and I found a fuller
+    description alongside
+    [nearZeroVar](https://search.r-project.org/CRAN/refmans/caret/html/nearZeroVar.html).
+    In summary, it looks at the distribution of each predictor
+    conditioned on the levels of the outcome, and identifies any
+    predictor that is sparse within groups of the outcome.
+
+    I ran `checkConditionalX` as follows - and no predictor was
+    identified. (I will add this to my early analysis checklist, along
+    with outliers, NAs, duplicates, etc .)
+
+    ```{r}
+    checkConditionalX(train_df |> select(-c(sentiment)), train_df$sentiment)
+    ```
+
+# Final Validation
+
+The three models were close enough. Only `ranger` improved from
+baseline, about equally for `preProcess` and `trainControl`.
+`randomForest` and `treebag` moved so slightly I would discount it to
+randomness.
+
+```{r warning = FALSE, message = FALSE}
+train_config <- list(
+    ranger = list(
+        tuneGrid = NULL
+    ),
+    Rborist = list(
+        tuneGrid = NULL
+    ),
+    treebag = list(
+        tuneGrid = NULL
+    )
+)
+
+final_results <- train_models(
+    .train = train_org,
+    .test  = test_org
+)
+
+final_summary <- bind_cols(
+    c('baseline', 'bestTune', 'trainControl', 'preProcess', 'finalValidation'),
+    bind_rows(
+        baselines,
+        bestTunes,
+        c(
+            ranger  = max(train_summary[['ranger']]),
+            Rborist = max(train_summary[['Rborist']]),
+            treebag = max(train_summary[['treebag']])
+        ),
+        c(
+            ranger  = max(pre_results[['ranger']]),
+            Rborist = max(pre_results[['Rborist']]),
+            treebag = max(pre_results[['treebag']])
+        ),
+        final_results
+    )
+)
+
+display_summary(final_summary)
+```
+
+# Conclusions
+
+1.  The winner is inconclusive; the numbers changes per run. (Did I NOT
+    set seed?) I only see Python solutions on Kaggle, and they generally
+    have train accuracy in the mid-90s and validation accuracy in the
+    mid-80s. This Rmd matches that, albeit erratically...
+2.  My primary goal was continued learning:
+    -   Paragraph-based sentiments was the big lesson.
+    -   I gained more comfort with `tryCatch` and `...`, but both came
+        with surprises. I need to learn more, especially whether there
+        is an idiomatic method of, for example, reading *optional*
+        parameters/values from a config file and passing to an ellipses.
+        Perhaps it is just that simple, but my experience here says
+        otherwise.
+    -   I had a note to myself to try
+        [dtree](https://www.rdocumentation.org/packages/dtree/versions/0.4.2/topics/dtree)
+        but when trying to install it I see that *Package ‘dtree’ was
+        removed from the CRAN repository.*
+3.  I had *many* troubles with this project - in addition to lengthy
+    execution times against the full training set:
+    -   Once, transitioning between Visual and Source editing modes, the
+        closing backticks were removed from almost every code block,
+        preventing Visual mode.
+    -   Many times, a block of code failed or ran extremely slowly in
+        RStudio but fine in the console - *or vice versa*.
+    -   Once, manually running code blocks from the top down, each
+        kickoff scrolled the document back to the top; forcing me to
+        scroll further and further down to run the next block. What is
+        that?!
+    -   Already mentioned, accuracy changed wildly without plausible
+        explanation, despite seed. Against the partitioned halves,
+        accuracy fluctuated from the mid-60s to mid-90s?!
+    -   I very often had to run code blocks *twice* in this Rmd: Often,
+        a spurious second box of (empty) output is created, and
+        disappears on subsequent run. Occasionally, the desired output
+        is cropped and unscrollable - and self-corrects on a subsequent
+        run. Occasionally, there is no output for no apparent reason -
+        in which case I can often run just the output-producing line(s),
+        proving that everything else worked.
+4.  Once again, most effort was for naught, other than learning. The
+    only thing that helped in a measurable way was the one obvious
+    need - calculating sentiments.
+
+# References
+
+<https://rpubs.com/chelseyhill/676279>
+
+<https://search.r-project.org/CRAN/refmans/caret/html/nearZeroVar.html>
+
+<https://cran.r-project.org/web/packages/ranger/ranger.pdf>
+
+<https://github.com/mjockers/syuzhet/blob/master/R/syuzhet.R>
+
+# Appendix
+
+## RandomForest Decision Tree
+
+I like to end with a look at a model's decision tree. I've never seen
+one with such symmetry! I can imagine the difficult choices.
+
+```{r fig.width = 14, fig.height = 14}
+fit <- randomForest(
+    factor(sentiment) ~ .,
+    train_df,
+    ntree = 20
+)   
+simplest_tree <- which.min(fit$forest$ndbigtree)
+fit$forest$xbestsplit <- round(fit$forest$xbestsplit, 2)  # 'digits' workaround
+plot.getTree(
+    fit,
+    k     = simplest_tree,
+    depth = 6,
+    main  = sprintf(
+        'RandomForest Decision Tree - Accuracy %.2f',
+        accuracy(fit, test_df)
+    )
+)
+```
+
+## Case-Specific Random Forests
+
+Reading further about `ranger`, I noticed `csrf` and thought I'd try it.
+Alas, running against the full train/validation sets gives, *Error in
+table(data, reference, dnn = dnn, ...) : all arguments must have the
+same length*. That seems odd - is it uncommon to have different sized
+data sets...?
+
+```{r}
+pred <- csrf(
+    factor(sentiment) ~ .,
+    training_data = train_df,
+    test_data     = test_df,
+    params1       = list(num.trees = 50, mtry = 4),
+    params2       = list(num.trees = 5)
+)
+
+cm <- confusionMatrix(pred, factor(test_df$sentiment))
+cm$overall[['Accuracy']]
+```

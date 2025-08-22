@@ -8,6 +8,7 @@
 #' @param    formula valid formula object
 #' @export
 aov_plot <- function(df, formula) {
+    E <- NULL
     tryCatch({F <- as.formula(formula)},
         error   = function(e) { E <- e }
     )
