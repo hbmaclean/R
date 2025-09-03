@@ -6,8 +6,10 @@
 #' @param   df data.frame object
 #' @param   digits = 2
 #' @param   sig.level = 0.001
+#' @param   tl.srt = 45
+#' @param   ... other arguments for ggcorrplot
 #' @export
-corr_plot <- function(df, digits = 2, sig.level = 0.001) {
+corr_plot <- function(df, digits = 2, sig.level = 0.001, tl.srt = 45, ...) {
     if (!is_numeric_df(df)) {
         warning('Mutating df to numeric')
         df <- as_numeric_df(df)
@@ -20,6 +22,7 @@ corr_plot <- function(df, digits = 2, sig.level = 0.001) {
         hc.method   = 'median',   # see ?hclust for other methods
         lab         = TRUE,       # adds correlation coefficients
         lab_size    = 3,
+        tl.srt      = tl.srt,     # x-label rotation
         digits      = digits,
         show.diag   = FALSE,      # omits self-correlation diagonal
         p.mat       = p.mat,      # p-values

@@ -1,0 +1,1351 @@
+---
+title: 'UCI Online Shoppers Purchasing Intention Analysis'
+author: hbmaclean
+date: "`r Sys.Date()`"
+editor_options:
+  markdown:
+    toc: true
+    wrap: 72
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    df_print: paged
+    code_folding: show
+---
+
+```{css, echo = FALSE}
+h1 {
+    margin-top: 2em;
+    border-bottom: 2px solid black;
+    padding-bottom: 5px;
+}
+h2 {
+    margin-top: 1em;
+}
+h3 {
+    margin-top: 1em;
+}
+p {
+    margin-top: 2px;
+}
+table {
+    margin-top: 1em;
+    margin-bottom: 1em;
+    background: snow;
+}
+th {
+    background: snow;
+}
+img {
+    border: 1px solid black;
+    margin-top: 4px;
+    margin-bottom: 4px;
+    width: 100%;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+I chose this dataset having worked in eCommerce. Below is a description
+of the data from
+[UCI](https://archive.ics.uci.edu/dataset/468/online+shoppers+purchasing+intention+dataset):
+
+> The dataset consists of feature vectors belonging to 12,330 sessions.
+> The dataset was formed so that each session would belong to a
+> different user in a 1-year period to avoid any tendency to a specific
+> campaign, special day, user profile, or period.
+>
+> The dataset consists of 10 numerical and 8 categorical attributes. The
+> 'Revenue' attribute can be used as the class label.
+>
+> "Administrative", "Administrative Duration", "Informational",
+> "Informational Duration", "Product Related" and "Product Related
+> Duration" represent the number of different types of pages visited by
+> the visitor in that session and total time spent in each of these page
+> categories. The values of these features are derived from the URL
+> information of the pages visited by the user and updated in real time
+> when a user takes an action, e.g. moving from one page to another.
+>
+> The "Bounce Rate", "Exit Rate" and "Page Value" features represent the
+> metrics measured by "Google Analytics" for each page in the e-commerce
+> site. The value of "Bounce Rate" feature for a web page refers to the
+> percentage of visitors who enter the site from that page and then
+> leave ("bounce") without triggering any other requests to the
+> analytics server during that session. The value of "Exit Rate" feature
+> for a specific web page is calculated as for all pageviews to the
+> page, the percentage that were the last in the session. The "Page
+> Value" feature represents the average value for a web page that a user
+> visited before completing an e-commerce transaction.
+>
+> The "Special Day" feature indicates the closeness of the site visiting
+> time to a specific special day (e.g. Mother’s Day, Valentine's Day) in
+> which the sessions are more likely to be finalized with transaction.
+> The value of this attribute is determined by considering the dynamics
+> of e-commerce such as the duration between the order date and delivery
+> date. For example, for Valentina’s day, this value takes a nonzero
+> value between February 2 and February 12, zero before and after this
+> date unless it is close to another special day, and its maximum value
+> of 1 on February 8.
+>
+> The dataset also includes operating system, browser, region, traffic
+> type, visitor type as returning or new visitor, a Boolean value
+> indicating whether the date of the visit is weekend, and month of the
+> year.
+
+# Installing Packages
+
+```{r message = FALSE}
+library(data.frame.X)
+install_packages(c(
+    'caret', 'stringr', 'readr', 'dplyr', 'kableExtra', 'DT', 'gridExtra',
+    'ranger', 'randomForest', 'naivebayes', 'nnet', 'tibble', 'missMethods',
+    'varhandle', 'devtools'
+))
+
+install_github('munoztd0/reprtree')
+eval(substitute(library(pkg), list(pkg='reprtree')))
+library(reprtree)
+
+set.seed(234)
+```
+
+# Data Creation
+
+This downloads the
+[zip](https://archive.ics.uci.edu/dataset/73/mushroom), extracts the
+data file, reads and parses the lines into a `data.frame` and adds
+column names.
+
+```{r message = FALSE}
+# Download online+shoppers+purchasing+intention+dataset.zip from UCI.edu
+# and render it as a data.frame
+fetch_data <- function(verbose = FALSE) {
+    options(timeout = 120)
+    tmp   <- tempfile()
+    zip   <- paste0(
+        'https://archive.ics.uci.edu',
+        '/static/public/468/online+shoppers+purchasing+intention+dataset.zip'
+    )
+    download.file(zip, tmp, quiet = !verbose)
+    data <- read_csv(unz(tmp, 'online_shoppers_intention.csv')) 
+
+    # Here I abbreviate some of the lengthy names as given
+    colnames(data) <- c(
+        'Admin', 'AdminDur', 'Info', 'InfoDur', 'Prod', 'ProdDur',
+        'BounceRate', 'ExitRate', 'PageVal', 'SpecialDay', 'Month',
+        'OS', 'Browser', 'Region', 'TrafficType', 'VisitorType',
+        'Weekend', 'Revenue'
+    )
+    return(data)
+}
+
+shoppers_df <- fetch_data()
+shoppers_df |>
+    slice_sample(n = 10) |>
+    mutate(across(where(is.numeric), ~ round(.x, 1))) |>
+    datatable(
+        rownames = FALSE,
+        options  = list(
+            dom        = 't',
+            scrollX    = TRUE,
+            pageLength = nrow(.data)
+        )
+    )
+```
+
+## Making Numeric
+
+Making the few non-numeric columns numeric which will simplify analysis.
+Month, obviously, can be converted to 1:12. The two logical columns,
+Weekend and Revenue, can be represented as 1:0. VisitorType can be
+represented by 1:3 for its three distinct values:
+
+```{r}
+table(shoppers_df$VisitorType) |>
+    kable(col.names = c('VisitorType', 'Frequency')) |>
+    kable_styling(full_width = FALSE, position = 'left')
+```
+
+```{r}
+shoppers_df <- shoppers_df |>
+    mutate(
+        Month       = coalesce(match(Month, month.abb), match(Month,month.name)),
+        VisitorType = match(VisitorType, as.vector(unique(VisitorType))),
+        across(where(is.logical), ~ as.integer(.x))
+    )
+```
+
+## Partitioning
+
+```{r}
+index     <- createDataPartition(y = shoppers_df$Revenue, times = 1, p = 0.5, list = FALSE)
+train_df  <- shoppers_df[index,]
+test_df   <- shoppers_df[-index,]
+```
+
+# Initial Analysis
+
+## Class Distribution
+
+85%/15% - may need to pick a model that supports class weights.
+
+```{r}
+round(prop.table(table(shoppers_df$Revenue)),2) |>
+    kable(col.names = c('Revenue', 'Frequency')) |>
+    kable_styling(full_width = FALSE, position = 'left')
+```
+
+## Missing, Duplicate, and Outlying Values {#missing_duplicate_outlying}
+
+There is a small portion of duplicate rows. In my last project, I found
+that removing duplicates crushed accuracy - so I will look to remove
+these experimentally later.
+
+```{r}
+any_NA_dup_outliers(shoppers_df, tabular = TRUE)
+```
+
+There are *many* outliers and extreme values. I suspect most are
+expected due to the nature of the data.
+
+```{r}
+colSums(rstatix::is_outlier(shoppers_df |> as.matrix())) |>
+    as.data.frame() |>
+    tibble::rownames_to_column(var = 'Column') |>
+    rename(Outliers = c(2)) |>
+    arrange(desc(Outliers)) |>
+    inner_join(
+        round(colMeans(shoppers_df),2) |>
+        as.data.frame() |>
+        tibble::rownames_to_column(var = 'Column') |>
+        rename(Mean = c(2)),
+        by = 'Column'
+    ) |>
+    inner_join(
+        round(apply(shoppers_df, 2, FUN = sd),2) |>
+        as.data.frame() |>
+        tibble::rownames_to_column(var = 'Column') |>
+        rename(SD = c(2)),
+        by = 'Column'
+    ) |>
+    kable() |>
+    kable_styling(
+        bootstrap_options = 'bordered',
+        full_width        = FALSE,
+        position          = 'left'
+    )
+```
+
+From work experience, I also suspect that durations are susceptible to
+"cart abandonment" - shoppers leaving a session in a forgotten browser
+window/tab and eventually timing out.
+
+Coupling the information above with the bar charts below, it is clear
+that product pages generally get lengthier looks - but also have extreme
+outliers (presumed abandonment); while admin- and info pages generally
+get brief looks - but also have outliers.
+
+Note that the axes are scaled for better visibility of the thin end; and
+that the Product Page axes have a 10-fold relationship with the other
+durations. It does appear that the most extreme durations are associated
+with zero revenue - consistent with a presumed session timeout.
+
+```{r warning = FALSE}
+common <- list(
+    geom_bar(width = 5), scale_y_sqrt(), scale_x_sqrt(),
+    labs(fill = 'Revenue', x = element_blank(), y = element_blank())
+)
+grid.arrange(
+    shoppers_df |> ggplot(aes(ProdDur, fill = factor(Revenue))) +
+        ggtitle('Product Page Durations') + common,
+    shoppers_df |> ggplot(aes(AdminDur, fill = factor(Revenue))) +
+        ggtitle('Admin Page Duration') + common,
+    shoppers_df |> ggplot(aes(InfoDur, fill = factor(Revenue))) +
+        ggtitle('Info Page Duration') + common,
+    nrow = 3
+)
+```
+
+Here is a second approach providing a similar look. Evidently, revenue
+is best with very brief cumulative page views; but continues for product
+page views up to about 15000 (ms, presumably.)
+
+```{r}
+grid.arrange(
+    aggregate(shoppers_df, Revenue ~ ProdDur, sum) |>
+        ggplot(aes(ProdDur, Revenue)) +
+        geom_line(),
+    aggregate(shoppers_df, Revenue ~ AdminDur, sum) |>
+        ggplot(aes(AdminDur, Revenue)) +
+        geom_line(),
+    aggregate(shoppers_df, Revenue ~ InfoDur, sum) |>
+        ggplot(aes(InfoDur, Revenue)) +
+        geom_line(),
+    nrow = 3
+)
+```
+
+## Near-Zero Variance
+
+As expected, durations and rates are variable; while other columns have
+relatively few distinct values. None of the columns is considered to
+have near-zero variance, and thus `nzv` and `zv` are not worthwhile
+`preProcess` methods here.
+
+```{r}
+nzv_plot(shoppers_df)
+```
+
+Related to `nearZeroVar`, `checkConditonalX` reports any predictor that
+is sparse conditioned on the levels of the outcome. Here, there is no
+such predictor, and thus `conditionalX` is not a worthwhile `preProcess`
+method here.
+
+```{r}
+checkConditionalX(shoppers_df |> select(-c(Revenue)), shoppers_df$Revenue)
+```
+
+## Correlation {#correlation}
+
+Two pairs, `ExitRate` and `BounceRate`, and `Prod` and `ProdDur`, have
+*about* 90% correlation. (Note that correlation is rounded to one digit
+for legibility.) Perhaps one from each pair can be omitted.
+
+`Browser`, `OS`, `Region`, and `Weekend`, and `TrafficType` to a lesser
+extent, have noticeably weak correlations and sparse representation due
+to high p-values. Perhaps one or more can be omitted.
+
+It is also notable that `PageVal` has the largest correlation with
+`Revenue`.
+
+```{r}
+corr_plot(shoppers_df, tl.srt = 90, digits = 1)
+```
+
+## Principal Component Analysis
+
+The fact that these plots are difficult to read indicates that the
+variance is spread widely and fairly evenly. `pca` does not look like a
+worthwhile `preProcess` method here.
+
+```{r fig.height = 5}
+pca_plot(shoppers_df, pct = .90)
+```
+
+But oh my! Later I learned that [scale](#scale_and_center) is disastrous
+here - causes `ranger` to always pick the negative class; and awhile
+after learning that, I realized that my `pca_plot` had `scale = TRUE`
+for `prcomp`. I've updated that to be optional, and... one PC expains
+99% of the overall variance!
+
+```{r}
+pca_plot(shoppers_df, scale = FALSE, pct = .99)
+```
+
+Knowing that, I refer back to my coursework and its [Dimension
+Reduction](https://rafalab.dfci.harvard.edu/dsbook-part-2/highdim/dimension-reduction.html)
+section, and plot the distance matrix for the data (a subset of it, for
+performance reasons) versus the `prcomp` rotated data of the first PC.
+
+```{r}
+x        <- as.matrix(shoppers_df |> slice_sample(prop = .20))
+pca      <- prcomp(x)
+d        <- dist(x)
+d_approx <- dist(pca$x[, 1])
+plot(d, d_approx)
+abline(0, 1, col = 'red')
+```
+
+## Quick Accuracy Check
+
+Below is a method to check accuracy via `ranger`.
+
+```{r}
+vanilla_classification <- function(.train = train_df, .test = test_df, ...) {
+    fit  <- ranger(factor(Revenue) ~ ., .train, ...)
+    pred <- predict(fit, .test)
+    cols <- c('Prevalence', 'Sensitivity', 'Specificity', 'Precision', 'F1')
+    .cm  <- confusionMatrix(pred$predictions, factor(.test$Revenue))
+    .cm$byClass |>
+        as.data.frame() |>
+        rownames_to_column(var = 'Class') |>
+        tidyr::pivot_wider(names_from = c(1), values_from = c(2)) |>
+        select(all_of(cols)) |>
+        mutate(
+            Accuracy = .cm$overall[['Accuracy']],
+            across(everything(), ~ sprintf('%.2f', .x * 100))
+        ) |>
+        kable(
+            digits  = 3,
+            caption = 'Ranger Classification Metrics'
+        ) |>
+        kable_styling(
+            bootstrap_options = 'bordered',
+            full_width = FALSE,
+            position = 'left'
+        )
+}
+vanilla_classification()
+```
+
+90% seems good - but is only 5% better than simply guessing the negative
+outcome.
+
+## Positive Class {#positive_class}
+
+By default, `TRUE`/`FALSE` and `1`/`0` are factored into the reverse
+order; but in this case, logically, `Revenue=TRUE` is positive. Does the
+order have any bearing?
+
+```{r}
+vanilla_classification(
+    .train = train_df |> mutate(Revenue = reorder(factor(Revenue), Revenue, decreasing=TRUE)),
+    .test  = test_df  |> mutate(Revenue = reorder(factor(Revenue), Revenue, decreasing=TRUE))
+)
+```
+
+I think this is clarifying, so I will lock in that change.
+
+-   Prevalence now reflects the positive class
+-   Sensitivity and Specificity are in keeping with their definitions -
+    True Positive and True Negative
+-   F1 is much lower because it is based upon Sensitivity and Precision
+-   Accuracy is essentially unchanged
+
+```{r}
+train_df <- train_df |>
+    mutate(Revenue = reorder(factor(Revenue), Revenue, decreasing=TRUE))
+test_df  <- test_df |>
+    mutate(Revenue = reorder(factor(Revenue), Revenue, decreasing=TRUE))
+```
+
+## Omitting Columns {#omitting_columns}
+
+Noted above in [Correlation](#correlation), `OS`, `Browser`, `Region`,
+`Weekend`, and `TrafficType` have relatively few and weak correlations;
+while `ExitRate` correlates strongly with `BounceRate`. I omitted
+numerous combinations and find that these six can be dropped without
+ill-effect - even perhaps a slight improvement, especially for
+Specificity.
+
+```{r}
+train_df <- train_df |> select(-c(OS,Browser,Region,Weekend,TrafficType,ExitRate))
+test_df  <- test_df  |> select(-c(OS,Browser,Region,Weekend,TrafficType,ExitRate))
+
+vanilla_classification()
+```
+
+## Omitting Duplicate Rows {#omit_duplicates}
+
+Noted above in [Missing, Duplicate, and Outlying
+Values](#missing_duplicate_outlying), there are 125 duplicate rows. I
+have learned to be cautious about removing them - and here again it
+reduces accuracy.
+
+```{r}
+vanilla_classification(.train = distinct(train_df), .test = distinct(test_df))
+```
+
+## Class Weights {#class_weights}
+
+For earlier projects, I've referred to [this
+article](https://medium.com/@ravi.abhinav4/improving-class-imbalance-with-class-weights-in-machine-learning-af072fdd4aa4)
+for weighing classes to overcome an imbalance. This does seem to help.
+Numbers change with every run, but Sensitivity is generally improved -
+which is precisely the goal, to more accurately predict true positives
+despite the low prevalence.
+
+```{r}
+class_weights <- c(
+    nrow(train_df) / (2 * sum(train_df$Revenue==1)),
+    nrow(train_df) / (2 * sum(train_df$Revenue==0))
+)
+vanilla_classification(class.weights = class_weights)
+```
+
+## Case Weights {#case_weights}
+
+There are also `case.weights`, for weighing the observations. I made two
+educated guesses as to weighing the rows. The first method is
+ineffective; the second method may be very slightly effective - in
+reference to the results from switching the [Positive
+Class](#positive_class).
+
+1.  Sum across rows the values of three booleans - whether the
+    Prod/Admin/Info page durations are outliers; then exaggerate the
+    results from 0:3 to 1:20 with `exp`; and finally inverse the
+    results, such that having no outlier equals 1 and having three
+    outliers equals 1/20.
+
+    ```{r}
+    case_weights <- 1 / exp(
+        rowSums(
+            rstatix::is_outlier(
+                train_df |>
+                    select(c(ProdDur, AdminDur, InfoDur)) |>
+                    as.matrix())
+    ))
+    vanilla_classification(case.weights = case_weights)
+    ```
+
+2.  Use `ntile` to spread the cumulative page durations into 50 buckets.
+
+    ```{r}
+    case_weights <- train_df |>
+        mutate(DurationBucket = ntile(ProdDur+AdminDur+InfoDur, 50)) |> pull(DurationBucket)
+    vanilla_classification(case.weights = case_weights)
+    ```
+
+## Impute Outliers {#impute_outliers}
+
+Here I impute outliers with median values. It proves to be ineffective;
+and factors are a mixed blessing...
+
+```{r}
+train_o      <- train_df |> mutate(Revenue = varhandle::unfactor(Revenue)) |> as.matrix()
+outliers     <- rstatix::is_outlier(train_o[,c('ProdDur', 'InfoDur', 'AdminDur')])
+idx          <- which(outliers)
+train_o[idx] <- NA
+train_o      <- train_o |>
+    as.data.frame() |>
+    mutate(Revenue = reorder(factor(Revenue), Revenue, decreasing=TRUE))
+
+test_o       <- test_df |> mutate(Revenue = varhandle::unfactor(Revenue)) |> as.matrix()
+outliers     <- rstatix::is_outlier(test_o[,c('ProdDur', 'InfoDur', 'AdminDur')])
+idx          <- which(outliers)
+test_o[idx]  <- NA
+test_o       <- test_o |>
+    as.data.frame() |>
+    mutate(Revenue = reorder(factor(Revenue), Revenue, decreasing=TRUE))
+
+vanilla_classification(
+    .train = impute_median(train_o),
+    .test  = impute_median(test_o)
+)
+```
+
+## Scale and Center {#scale_and_center}
+
+Heh, it seems scaling/centering causes `ranger` to always predict the
+negative class. The same is true when just centering (`scale = FALSE`)
+and just scaling (`center = FALSE`).
+
+```{r}
+vanilla_classification(
+    .train = train_df |> mutate(across(where(is.numeric), ~ scale(.x)[1])),
+    .test  = test_df  |> mutate(across(where(is.numeric), ~ scale(.x)[1]))
+)
+```
+
+## Initial Conclusions {#initial_conclusions}
+
+[Omitting columns](#omitting_columns) with weak correlations and high
+p-values was NOT harmful, and thus considered worthwhile.
+
+Switching the [positive class](#0) by reversing the natural factor order
+of `Revenue` shifts and clarifies the metrics, particularly Prevalence,
+Specificity and Sensitivity - without affecting accuracy.
+
+[Case weights](#case_weights) are somewhat effective for balancing the
+two outcomes.
+
+[Omitting duplicates](#omit_duplicates), [imputing
+outliers](#impute_outliers), and [scaling and
+centering](#scale_and_center) are non-starters.
+
+Looking ahead to `train` and the flexibility it provides, and probably
+another model or few, I have already ruled out numerous `preProcess`
+options:
+
+-   `corr` (correlation)
+-   `nzv`, `zv`, and `conditionalX` (variance-related)
+-   `scale`, `center`
+-   `median_impute` (NA'd outliers)
+
+# Additional Models
+
+Here I try some other classification models for comparison.
+
+First, a configuration - for each model, a simple function/wrapper of
+the model and the required `type` for `predict`.
+
+```{r}
+model_config <- list(
+    ranger       = list(
+        FUNC = function(...) { ranger(...) },
+        TYPE = 'response'
+    ),
+    randomForest = list(
+        FUNC = function(...) { randomForest(...) },
+        TYPE = 'response'
+    ),
+    knn3         = list(
+        FUNC = function(...) { knn3(...) },
+        TYPE = 'class'
+    ),
+    naive_bayes  = list(
+        FUNC = function(...) { naive_bayes(...) },
+        TYPE = 'class'
+    ),
+    multinom     = list(
+        FUNC = function(...) { multinom(...) },
+        TYPE = 'class'
+    )
+)
+```
+
+And methods for predictions, wrapping `predict` with some intelligence
+and error checking; and for accuracy, wrapping the call to `predict` and
+`confusionMatrix` with error checking.
+
+```{r}
+predictions <- function(model, test_df, type = 'class') {
+    tryCatch({
+        .pred <- predict(model, test_df, type = type)
+    }, 
+    error = function(e) {
+        print(c(Model = model, error = e))
+    },
+    finally = {
+        if(!is.atomic(.pred)) {
+            .pred <- .pred$predictions
+        }
+        return(.pred)
+    })
+}
+
+accuracy <- function(model, test_df, ...) {
+    tryCatch({
+        .pred <- predictions(model, test_df, ...)
+        .cm   <- confusionMatrix(.pred, as.factor(test_df$Revenue))
+    },
+    error = function(e) {
+        print(c(Model = model, error = e))
+    },
+    finally = {
+        if (!exists('.cm')) {
+            return(NA)
+        }
+        else {
+            return(round(100*.cm$overall[['Accuracy']],2))
+        }
+    })
+}
+```
+
+And a "private" function to run a single model, with a caller to run all
+models in the configuration.
+
+```{r}
+fc <- as.formula(factor(Revenue) ~ .)
+.run_model <- function(cfg, .formula, .train, .test) {
+    FUNC <- cfg$FUNC
+    TYPE <- cfg$TYPE
+    accuracy(
+        get("FUNC")(.formula, .train),
+        .test, type = TYPE
+    )
+}
+
+run_models <- function(
+        .models  = model_config,
+        .formula = fc,
+        .train   = train_df,
+        .test    = test_df
+    ) {
+        results <- sapply(names(.models), function(model) {
+            .run_model(.models[[model]], .formula, .train, .test)
+        })
+        names(results) <- names(.models)
+        return(results)
+}
+```
+
+Finally I run the models. It seems `ranger` was a fine first pick; with
+`randomForest` keeping it company at about 90%.
+
+```{r warning = FALSE}
+shush <- capture.output({
+    baselines <- run_models()
+})
+baselines |>
+    as.data.frame() |>
+    arrange(desc(baselines)) |>
+    kable(col.names = c('Model', 'Accuracy')) |>
+    kable_styling(full_width = FALSE, position = 'left')
+```
+
+# Training Several Models
+
+Now I look to `train` and the flexibility it provides. Similar to
+earlier, here is a "private" function to run a single model, and a
+caller to run all models in the configuration.
+
+```{r}
+.train_model  <- function(
+        model, cfg, .formula, .train, .test, bestTune,
+       .trControl = NULL, .preProcess = NULL
+) {
+    tryCatch({
+        fit <- (function(...) {
+            caret::train(
+                .formula,
+                method     = model,
+                data       = .train,
+                trControl  = dplyr::coalesce(
+                    .trControl,
+                    trainControl(
+                        method = 'repeatedcv',
+                        number = 2,
+                        p      = .5
+                    )
+                ),
+                tuneGrid   = cfg$tuneGrid,
+                preProcess = .preProcess,
+                ...
+            )
+        })() # ideally, (...) 
+    }, error = function(e) {
+        print(c(Model = model, error = e))
+    },
+    finally = {
+        if (exists('fit')) {
+            .acc <- accuracy(fit, .test, type = dplyr::coalesce(cfg$type, 'raw'))
+
+            if (bestTune) {
+                return(
+                    c(
+                        Model    = model,
+                        Accuracy = .acc,
+                        bestTune = paste(
+                            sapply(1:length(fit$bestTune), function(i) {
+                                paste(
+                                    names(fit$bestTune)[i],
+                                    fit$bestTune[[i]],
+                                    sep = '='
+                                )
+                            }),
+                            collapse = ', '
+                        )
+                    )
+                )
+            }
+            else {
+                return(.acc)
+            }
+        }
+    })
+}
+
+train_models <- function(
+    .config       = train_config,
+    .formula      = fc,
+    .train        = train_df,
+    .test         = test_df,
+    bestTune      = FALSE,
+    .trControl    = NULL,
+    .preProcess   = NULL
+) {
+    results <- sapply(names(.config), function(model) {
+        .train_model(
+            model, .config[[model]], .formula, .train, .test,
+            bestTune, .trControl, .preProcess
+        )
+    })
+    names(results) <- names(.config)
+    return(results)
+}
+```
+
+## tuneGrid
+
+And here, another configuration structure, with model-specific
+`tuneGrid` objects - initially `NULL` for a baseline reference.
+
+```{r}
+train_config <- list(
+    ranger = list(
+        tuneGrid = NULL
+    ),
+    rf = list(
+        tuneGrid = NULL
+    ),
+    Rborist = list(
+        tuneGrid = NULL
+    ),
+    treebag = list(
+        tuneGrid = NULL
+    ),
+    xgbTree = list(
+        tuneGrid = NULL
+    ),
+    svmRadial = list(
+        tuneGrid = NULL
+    )
+)
+```
+
+And finally, a baseline run:
+
+```{r message = FALSE, warning = FALSE}
+fc <- as.formula(factor(Revenue) ~ .)
+shush <- capture.output({
+    train_baselines <- train_models()
+})
+train_baselines |>
+    as.data.frame() |>
+    arrange(desc(train_baselines)) |>
+    kable(col.names = c('Model', 'Accuracy')) |>
+    kable_styling(full_width = FALSE, position = 'left')
+```
+
+Now another run to capture each model's `bestTune`:
+
+```{r warning = FALSE}
+shush <- capture.output({
+    bestTunes <- train_models(bestTune = TRUE)
+})
+
+t(unname(bestTunes)) |>
+    kable(col.names = c('Model', 'Accuracy', 'bestTune')) |>
+    kable_styling(
+        full_width = FALSE,
+        position   = 'left',
+        bootstrap_options = c('bordered', 'striped')
+    )
+```
+
+Now another run with `tuneGrid` parameters spanning the initial best
+values. Having used `xgbTree` before, I know to be careful with its
+sprawling `tuneGrid` - to not create too many permutations.
+
+```{r}
+train_config <- list(
+    ranger = list(
+        tuneGrid = expand.grid(
+            mtry          = c(2,4,6,8),
+            splitrule     = c('gini', 'extratrees'),
+            min.node.size = c(1,5,10,20)
+        )
+    ),
+    rf = list(
+        tuneGrid = expand.grid(
+            mtry = c(2,4,6,8)
+        )
+    ),
+    Rborist = list(
+        tuneGrid = expand.grid(
+            predFixed = c(2,4,6,8),
+            minNode   = c(1,2,5,10)
+        )
+    ),
+    treebag = list(
+        tuneGrid = NULL
+    ),
+    xgbTree = list(
+        tuneGrid = expand.grid(
+            nrounds          = 50,
+            max_depth        = c(2,4,10),
+            eta              = c(0.01, 0.1, 0.4),
+            gamma            = c(0, .3),
+            colsample_bytree = 0.6,
+            min_child_weight = c(1,3,5),
+            subsample        = 1
+        )
+    ),
+    svmRadial = list(
+        tuneGrid = expand.grid(
+            sigma = c(.001, .01, .1, .3),
+            C     = c(.5, 1, 5, 10)
+        )
+    )
+)
+```
+
+Well, I have never really had much luck making improvements via
+`tuneGrid`. I suspect models already do the same - try *ranges* of
+values and hone in on the best. Some values did change, but accuracy was
+never improved significantly. Fruitless again, other than *maybe*
+`xgbTree`, and figuring out a solution for presenting `bestTune` values.
+
+```{r warnings = FALSE, message = FALSE}
+shush <- capture.output({
+    bestTunesII <- train_models(bestTune = TRUE)
+})
+
+t(unname(bestTunesII)) |>
+    kable(col.names = c('Model', 'Accuracy', 'bestTune')) |>
+    kable_styling(
+        full_width = FALSE,
+        position   = 'left',
+        bootstrap_options = c('bordered', 'striped')
+    )
+```
+
+I'll lock in the settings for `xgbTree` and `Rborist` and pitch the
+rest.
+
+```{r}
+train_config <- list(
+    ranger = list(
+        tuneGrid = NULL
+    ),
+    rf = list(
+        tuneGrid = NULL
+    ),
+    Rborist = list(
+        tuneGrid = expand.grid(
+            predFixed = 2,
+            minNode   = c(10,20,30)
+        )
+    ),
+    treebag = list(
+        tuneGrid = NULL
+    ),
+    xgbTree = list(
+        tuneGrid = expand.grid(
+            nrounds          = 50,
+            max_depth        = 4,
+            eta              = 0.1,
+            gamma            = c(.3,.5,.7),
+            colsample_bytree = 0.6,
+            min_child_weight = 3,
+            subsample        = 1
+        )
+    ),
+    svmRadial = list(
+        tuneGrid = NULL
+    )
+)
+```
+
+```{r warnings = FALSE, message = FALSE}
+shush <- capture.output({
+    bestTunesIII <- train_models(bestTune = TRUE)
+})
+
+t(unname(bestTunesIII)) |>
+    kable(col.names = c('Model', 'Accuracy', 'bestTune')) |>
+    kable_styling(
+        full_width = FALSE,
+        position   = 'left',
+        bootstrap_options = c('bordered', 'striped')
+    )
+```
+
+## preProcess
+
+I have already ruled out many `preProcess` options in my [initial
+conclusions](#initial_conclusions). Here I try `BoxCox`, `YeoJohnson`,
+`spacialSign` and `pca`. I tried `expoTrans` as well, but it spewed
+*Expo. transform induced infinite values in several predictors and is
+ommitted: AdminDur, InfoDur, ProdDur*.
+
+```{r}
+display_summary <- function(.data) {
+    .data |>
+        dplyr::rename(` ` = c(1)) |>
+        datatable(
+            rownames = FALSE,
+            options  = list(
+                dom        = 't',
+                pageLength = nrow(.data)
+            )
+        )
+}
+```
+
+```{r warning = FALSE, message = FALSE, error = FALSE}
+shush <- capture.output({
+    pre_results <- bind_rows(
+        train_models(.preProcess = 'BoxCox'),
+        train_models(.preProcess = 'YeoJohnson'),
+        train_models(.preProcess = 'spatialSign'),
+        train_models(.preProcess = 'pca',
+            .trControl = trainControl(
+                preProcOptions = list(thresh = .99),
+                method = 'repeatedcv',
+                number = 2,
+                p      = .5
+            )
+        )
+    )
+})
+
+pre_summary <- bind_cols(
+    c('BoxCox', 'YeoJohnson', 'spatialSign', 'pca'),
+    pre_results
+)
+
+display_summary(pre_summary)
+```
+
+## trainControl
+
+```{r warning = FALSE, message = FALSE}
+boot_results <- bind_rows(
+    train_models(.trControl = trainControl(
+        method = 'boot', number = 2)),
+    train_models(.trControl = trainControl(
+        method = 'boot632', number = 2)),
+    train_models(.trControl = trainControl(
+        method = 'optimism_boot', number = 2)),
+    train_models(.trControl = trainControl(
+        method = 'boot_all', number = 2))
+)
+
+cv_results <- bind_rows(
+    train_models(.trControl = trainControl(
+        method = 'cv', p = .5, repeats = 2, number = 2)),
+    train_models(.trControl = trainControl(
+        method = 'repeatedcv', p = .5, repeats = 2, number = 2)),
+    train_models(.trControl = trainControl(
+        method = 'LGOCV', p = .5, repeats = 2, number = 2))
+)
+
+train_summary <- bind_cols(
+    c(
+        'boot', 'boot632', 'optimism_boot', 'boot_all',
+        'cv', 'repeatedcv', 'LGOCV'
+    ),
+    bind_rows(boot_results, cv_results)
+)
+
+display_summary(train_summary)
+```
+
+# Focus on xgbTree
+
+I do not know how authoritative this
+[visual-xgboost-tuning-with-caret](https://www.kaggle.com/code/pelkoja/visual-xgboost-tuning-with-caret)
+article is, but it seems knowledgeable. Here, I follow it quite closely,
+in my own style.
+
+```{r warning = FALSE}
+shush <- capture.output({
+    xgb <- caret::train(
+        fc,
+        method     = 'xgbTree',
+        data       = train_df,
+        trControl  = trainControl(
+                        method = 'cv',
+                        number = 3
+                    ),
+        tuneGrid   = expand.grid(
+            nrounds          = seq(200, 1000, 50),
+            eta              = c(0.025, 0.05, 0.1, 0.3),
+            max_depth        = 2:6,
+            min_child_weight = 1,
+            colsample_bytree = 1,
+            subsample        = 1,
+            gamma            = 0
+        )
+    )
+})
+```
+
+Here I plot accuracy per `max_depth` versus `nrounds`, faceted by `eta`.
+
+```{r}
+xgb$results |>
+    ggplot(aes(nrounds, Accuracy, color = factor(max_depth))) +
+    geom_point() +
+    geom_line() +
+    facet_wrap(~eta) + 
+    labs(color = 'Max Tree Depth') +
+    ggtitle(
+        'Accuracy vs. N-Rounds per Tree Depth, Faceted by eta',
+        subtitle = sprintf('Best Accuracy, %.2f', max(xgb$results$Accuracy)*100)
+    )
+```
+
+Best accuracy above should align with `bestTune`:
+
+```{r}
+xgb$bestTune |>
+    as_tibble() |>
+    kable(caption = sprintf('Accuracy %%%.2f', max(xgb$results$Accuracy)*100)) |>
+    kable_styling(bootstrap_options = 'bordered')
+```
+
+Here I lock in the "best" `eta`; continue flexing on `max_depth`; and
+add variability for `min_child_weight`.
+
+```{r warning = FALSE}
+eta   <- xgb$bestTune$eta
+shush <- capture.output({
+    xgb <- caret::train(
+        fc,
+        method     = 'xgbTree',
+        data       = train_df,
+        trControl  = trainControl(
+                        method = 'cv',
+                        number = 3
+                    ),
+        tuneGrid   = expand.grid(
+            nrounds          = seq(200, 1000, 50),
+            eta              = eta,
+            max_depth        = 2:5,
+            min_child_weight = 1:4,
+            colsample_bytree = 1,
+            subsample        = 1,
+            gamma            = 0
+        )
+    )
+})
+```
+
+Here, I plot accuracy per `min_child_weight` versus `nrounds`, faceted
+by `max_depth`.
+
+```{r}
+xgb$results |>
+    ggplot(aes(nrounds, Accuracy, color = factor(min_child_weight))) +
+    geom_point() +
+    geom_line() +
+    facet_wrap(~max_depth) + 
+    labs(color = 'Min Child Weight') +
+    ggtitle(
+        'Accuracy vs. N-Rounds per Child Weight, Faceted by Max Depth',
+        subtitle = sprintf('Best Accuracy, %.2f', max(xgb$results$Accuracy)*100)
+    )
+```
+
+And inspect `bestTune`:
+
+```{r}
+xgb$bestTune |>
+    as_tibble() |>
+    kable(caption = sprintf('Accuracy %%%.2f', max(xgb$results$Accuracy)*100)) |>
+    kable_styling(bootstrap_options = 'bordered')
+```
+
+Here I lock in "best" `max_depth` and `min_child_weight`, along with
+`eta`; and create sequences for `colsample_bytree` and `subsample`.
+(Again, being cautious about the size of `tuneGrid` - here, 250
+permutations.)
+
+```{r}
+max_depth        <- xgb$bestTune$max_depth
+min_child_weight <- xgb$bestTune$min_child_weight
+
+shush <- capture.output({
+    xgb <- caret::train(
+        fc,
+        method     = 'xgbTree',
+        data       = train_df,
+        trControl  = trainControl(
+                        method = 'cv',
+                        number = 3
+                    ),
+        tuneGrid   = expand.grid(
+            nrounds          = seq(200, 1000, 50),
+            eta              = eta,
+            max_depth        = max_depth,
+            min_child_weight = min_child_weight,
+            colsample_bytree = seq(.4, 1, .2),
+            subsample        = seq(.2, 1, .2),
+            gamma            = 0
+        )
+    )
+})
+```
+
+And here, I plot accuracy per `subsample` versus `nrounds`, faceted by
+`colsample_bytree`.
+
+```{r}
+xgb$results |>
+    ggplot(aes(nrounds, Accuracy, color = factor(subsample))) +
+    geom_point() +
+    geom_line() +
+    facet_wrap(~colsample_bytree) + 
+    labs(color = 'Subsample') +
+    ggtitle(
+        'Accuracy vs. N-Rounds per Subsample, Faceted by colsample_bytree',
+         subtitle = sprintf('Best Accuracy, %.2f', max(xgb$results$Accuracy)*100)
+)
+```
+
+And inspect `bestTune`:
+
+```{r}
+xgb$bestTune |>
+    as_tibble() |>
+    kable(caption = sprintf('Accuracy %%%.2f', max(xgb$results$Accuracy)*100)) |>
+    kable_styling(bootstrap_options = 'bordered')
+```
+
+Here I lock in the "best" `colsample_bytree` and `subsample`, and create
+a sequence for `gamma`.
+
+```{r}
+colsample_bytree <- xgb$bestTune$colsample_bytree
+subsample        <- xgb$bestTune$subsample
+
+shush <- capture.output({
+    xgb <- caret::train(
+        fc,
+        method     = 'xgbTree',
+        data       = train_df,
+        trControl  = trainControl(
+                        method = 'cv',
+                        number = 3
+                    ),
+        tuneGrid   = expand.grid(
+            nrounds          = seq(200, 1000, 50),
+            eta              = eta,
+            max_depth        = max_depth,
+            min_child_weight = min_child_weight,
+            colsample_bytree = colsample_bytree,
+            subsample        = subsample,
+            gamma            = seq(0, 1, .1)
+        )
+    )
+})
+```
+
+And plot accuracy per `gamma` versus `nrounds`.
+
+```{r}
+xgb$results |>
+    ggplot(aes(nrounds, Accuracy, color = factor(gamma))) +
+    geom_point() +
+    geom_line() +
+    labs(color = 'Gamma') +
+    ggtitle(
+        'Accuracy vs. N-Rounds per Gamma',
+         subtitle = sprintf('Best Accuracy, %.2f', max(xgb$results$Accuracy)*100)
+)
+```
+
+Inspect `bestTune`:
+
+```{r}
+xgb$bestTune |>
+    as_tibble() |>
+    kable(caption = sprintf('Accuracy %%%.2f', max(xgb$results$Accuracy)*100)) |>
+    kable_styling(bootstrap_options = 'bordered')
+```
+
+Well, that does give the best accuracy during this process - this time,
+but the results are ever-changing despite seed. Here I lock in the
+"best" `gamma`, and incorporate 'YeoJohnson' as a `preProcess` method,
+and replace 'cv' with 'optimism_boot' for the `trainControl` method -
+two items that made minor improvements for this model earlier.
+
+```{r}
+gamma <- xgb$bestTune$gamma
+
+shush <- capture.output({
+    xgb <- caret::train(
+        fc,
+        method     = 'xgbTree',
+        data       = train_df,
+        trControl  = trainControl(method = 'optimism_boot'),
+        tuneGrid   = expand.grid(
+            nrounds          = seq(200, 1000, 50),
+            eta              = eta,
+            max_depth        = max_depth,
+            min_child_weight = min_child_weight,
+            colsample_bytree = colsample_bytree,
+            subsample        = subsample,
+            gamma            = gamma
+        ),
+        preProcess = c('YeoJohnson')
+    )
+})
+```
+
+Inspect `bestTune` and resulting accuracy:
+
+```{r}
+xgb$bestTune |>
+    as_tibble() |>
+    kable(caption = sprintf('Accuracy %%%.2f', max(xgb$results$Accuracy)*100)) |>
+    kable_styling(bootstrap_options = 'bordered')
+```
+
+```{r}
+nrounds <- xgb$bestTune$nrounds
+eta     <- xgb$bestTune$eta
+
+shush <- capture.output({
+    xgb <- caret::train(
+        fc,
+        method     = 'xgbTree',
+        data       = train_df,
+        trControl  = trainControl(
+            method         = 'optimism_boot',
+            preProcOptions = list(thresh = .99)
+        ),
+        tuneGrid   = expand.grid(
+            nrounds          = nrounds,
+            eta              = eta,
+            max_depth        = max_depth,
+            min_child_weight = min_child_weight,
+            colsample_bytree = colsample_bytree,
+            subsample        = subsample,
+            gamma            = gamma
+        ),
+        preProcess = c('YeoJohnson', 'pca')
+    )
+})
+
+xgb$bestTune |>
+    as_tibble() |>
+    kable(caption = sprintf('Accuracy %%%.2f', max(xgb$results$Accuracy)*100)) |>
+    kable_styling(bootstrap_options = 'bordered')
+```
+
+# Decision Tree
+
+I like to finish with a glimpse at a decision tree, for a sense of the
+inner mechanics.
+
+```{r fig.height = 14, fig.width = 14}
+fit                   <- randomForest(Revenue ~ ., train_df, ntree = 20)
+simplest_tree         <- which.min(fit$forest$ndbigtree)
+fit$forest$xbestsplit <- round(fit$forest$xbestsplit, 2)  # 'digits' workaround
+plot.getTree(
+    fit,
+    k     = simplest_tree,
+    depth = 6,
+    main  = sprintf(
+         'RandomForest Decision Tree - Accuracy %.2f',
+         accuracy(fit, test_df)
+    )
+)
+```
+
+# Conclusions
+
+Again, my primary goal was continued learning. I used `t` to rotate
+`bestTune` objects, after pondering `pivot_wider` and `pivot_longer`;
+discovered `capture.output` to silence unwanted messages; had my first
+opportunity since classwork to look at `dist` (for other projects, it
+ran out of memory or simply seemed inapplicable); and realized my error
+of assuming `scale=TRUE` for `prcomp`.
+
+Once again though, while I am able to fairly quickly identify one good
+model from many, I seem unable to make measurable improvements with
+`preProcess`, `trainControl`, `tuneGrid`, imputing outliers, reducing
+dimensions, or other attempts.
+
+Four models slightly exceeded 90%, but none consistently stood out.
+
+In this case, I *pause* with a working model; disappointed that it is
+merely 5% better than guessing, and frustrated that I could not overcome
+the class imbalance.
+
+# References
+
+<https://www.kaggle.com/code/pelkoja/visual-xgboost-tuning-with-caret>
+
+<https://rafalab.dfci.harvard.edu/dsbook-part-2/highdim/dimension-reduction.html>

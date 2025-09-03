@@ -100,7 +100,7 @@
 #' @export
 #' @seealso <https://www.rdocumentation.org/packages/factoextra/versions/1.0.7/topics/eigenvalue>
 #' @seealso <https://www.sthda.com/english/articles/31-principal-component-methods-in-r-practical-guide/118-principal-component-analysis-in-r-prcomp-vs-princomp>
-pca_plot <- function(df, pct = 0.90, which = c('bar', 'scree', 'box')) {
+pca_plot <- function(df, pct = 0.90, scale = TRUE, which = c('bar', 'scree', 'box')) {
     if (!is_numeric_df(df)) {
         warning('Mutating df to numeric')
         df <- as_numeric_df(df)
@@ -112,7 +112,7 @@ pca_plot <- function(df, pct = 0.90, which = c('bar', 'scree', 'box')) {
         stop('"which" must be one or more of "bar", "scree", "box"')
     }
 
-    pca <- prcomp(df, scale = TRUE)
+    pca <- prcomp(df, scale = scale)
     PCs <- which(cumsum(pca$sdev^2)/sum(pca$sdev^2) < pct)
 
     if (!length(PCs)) {
@@ -134,7 +134,7 @@ pca_plot <- function(df, pct = 0.90, which = c('bar', 'scree', 'box')) {
     grid.arrange(
         grobs = .plots,
         top   = textGrob(
-            sprintf('Principal Component Analysis, %d%% Variance', pct * 100),
+            sprintf('Principal Component Analysis, %.2f%% Variance', pct * 100),
             gp = gpar(fontsize = 16, fontface = "bold")
        )
     )

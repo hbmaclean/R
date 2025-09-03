@@ -490,7 +490,7 @@ models <- list(
 **Notes:**
 
 1.  Originally, I had six models - the above three plus `multinom`,
-    `native_bayes`, and `avNNet`. I eventually pared it down to shave
+    `naive_bayes`, and `avNNet`. I eventually pared it down to shave
     execution time.
 2.  `ranger` was uniquely problematic here. Originally, rather than
     `TYPE`, I set this up as `extraArgs` with a value of

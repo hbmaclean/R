@@ -25,5 +25,6 @@ nzv_plot <- function(df) {
         ) |>
         ggplot(aes(Column, Variability, color = NearZeroVar)) +
         geom_col(color = '#DC3220', fill = '#DC3220', width = .3) +
+        theme(axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1)) +
         labs(x = element_blank())
 }
